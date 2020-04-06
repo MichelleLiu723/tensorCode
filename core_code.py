@@ -1,9 +1,111 @@
 #!/usr/bin/env python
 # coding: utf-8
+import random
 
 import torch
 import torch.optim as optim
-import random
+import tensornetwork as tn
+"""
+### NOTES ON TENSOR NETWORK FORMAT ###
+
+A tensor network is specified as a list of tensors, each of whose shape is
+formatted in a specific way. In particular, for a network with n tensor
+cores, the shape will be:
+
+tensor_i.shape = (r_1, r_2, ..., r_i, ..., r_n, [batch]),
+
+where r_j gives the tensor network rank (TN-rank) connecting cores i and j
+when j != i, while r_i gives the dimension of the input to core i. This 
+implies that tensor_i.shape[j] == tensor_j.shape[i], and stacking the 
+shapes of all the tensors in order gives the adjacency matrix of the 
+network (ignoring the diagonals).
+
+The optional batch index allows for multiple networks to be processed in 
+parallel. It's a little bit hackey getting batch inputs to work well with 
+PyTorch and TensorNetwork, but such is life.
+"""
+
+# Set global defaults
+tn.set_default_backend("pytorch")
+torch.set_default_tensor_type(torch.DoubleTensor)
+
+
+def contract_closed_network(tensor_list):
+    """
+    Contract a closed (no inputs) tensor network to get a scalar
+
+    Args:
+        tensor_list: List of (properly formatted) tensors that encodes the
+                     closed tensor network
+
+    Returns:
+        scalar:      Scalar output giving the value of contracted network
+    """
+    pass
+
+def contract_inputs(tensor_list, input_list):
+    """
+    Contract input vectors with open tensor network to get closed network
+
+    Args:
+        tensor_list: List of (properly formatted) tensors that encodes the
+                     open tensor network
+        input_list:  List of inputs for each of the cores in our tensor
+
+    Returns:
+        closed_list: List of tensors that encodes the closed tensor network
+    """
+    pass
+
+def tn_inner_prod(tensor_list1, tensor_list2):
+    """
+    Get inner product of two tensor networks with identical input dims
+
+    Args:
+        tensor_list1: List of (properly formatted) tensors that encodes
+                      the first (open) tensor network
+        tensor_list2: List of (properly formatted) tensors that encodes
+                      the second (open) tensor network
+
+    Returns:
+        inner_prod:   Scalar giving inner product between input networks
+    """
+    pass
+
+def random_tn(input_dims, ranks=1):
+    """
+    Initialize a tensor network with random (normally distributed) cores
+
+    Args:
+        input_dims:  List of input dimensions for each core in the network
+        ranks:       Scalar or list of ranks connecting different cores.
+                     For scalar inputs, all ranks will be initialized at
+                     the specified number, whereas more fine-grained ranks
+                     are specified in the following format:
+                     [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}],
+                      ..., [r_{n-1,n}]]
+
+    Returns:
+        tensor_list: List of randomly initialized and properly formatted
+                     tensors encoding our tensor network
+    """
+    pass
+
+def better_copynode(num_axes, dimension):
+    """
+    Return a list of connected CopyNode objects which emulate a large CopyNode
+
+    Args:
+        num_axes:      The number of edges in the output, equivalent to 
+                       the `rank` parameter of CopyNode
+        dimension:     The dimension of each of the edges of the output
+
+    Returns:
+        copynode_list: List of connected CopyNode objects
+    """
+    pass
+
+### OLD CODE ###
 
 def get_repeated_Indices(list_of_indices):
     #input: string of indices for the tensors. 
