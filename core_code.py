@@ -129,20 +129,52 @@ def unpack_ranks(in_dims, ranks):
 
     return shape_list
 
-
-def better_copynode(num_axes, dimension):
+def better_copynode(num_edges, dimension):
     """
-    Return a list of connected CopyNode objects which emulate a large CopyNode
+    Return a list of small connected nodes which emulates a large CopyNode
 
     Args:
-        num_axes:      The number of edges in the output, equivalent to 
-                       the `rank` parameter of CopyNode
-        dimension:     The dimension of each of the edges of the output
+        num_edges: The number of dangling edges in the output, equivalent 
+                   to the `rank` parameter of CopyNode
+        dimension: The dimension of each of the edges of the output
 
     Returns:
-        copynode_list: List of connected CopyNode objects
+        edge_list: List of edges of our composite CopyNode object
     """
-    pass
+    # For small numbers of edges, just use a single CopyNode
+    if num_edges < 4:
+        node = tn.CopyNode(rank=num_edges, dimension=dimension)
+        return node.get_all_edges()
+
+    # Initialize list of free edges with output of trivial identity mats
+    input_node = tn.Node(torch.eye(dimension))
+    edge_list, dummy_list = zip(*[input_node.copy().get_all_edges() 
+                                  for _ in range(num_edges)])
+
+    # Iteratively contract dummy edges until we have less than 4
+    dummy_len = len(dummy_list)
+    while dummy_len > 4:
+        odd = dummy_len % 2 == 1
+        half_len = dummy_len // 2
+
+        # Apply third order tensor to contract two dummy indices together
+        temp_list = []
+        for i in range(half_len):
+            temp_node = tn.CopyNode(rank=3, dimension=dimension)
+            temp_node[1] ^ dummy_list[2 * i]
+            temp_node[2] ^ dummy_list[2 * i + 1]
+            temp_list.append(temp_node[0])
+        if odd:
+            temp_list.append(dummy_list[-1])
+
+        dummy_list = temp_list
+        dummy_len = len(dummy_list)
+
+    # Contract the last dummy indices together
+    last_node = tn.CopyNode(rank=dummy_len, dimension=dimension)
+    [last_node[i] ^ dummy_list[i] for i in range(dummy_len)]
+
+    return edge_list
 
 ### OLD CODE ###
 
