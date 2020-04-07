@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
 import random
+from functools import reduce
 
 import torch
-import torch.optim as optim
+import numpy as np
 import tensornetwork as tn
+import torch.optim as optim
 """
 ### NOTES ON TENSOR NETWORK FORMAT ###
 
@@ -23,6 +25,10 @@ network (ignoring the diagonals).
 The optional batch index allows for multiple networks to be processed in 
 parallel. It's a little bit hackey getting batch inputs to work well with 
 PyTorch and TensorNetwork, but such is life.
+
+On occasion, the ranks are specified in the following triangular format:
+     [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}], ...
+      ..., [r_{n-2,n-1}, r_{n-2,n}], [r_{n-1,n}]]
 """
 
 # Set global defaults
@@ -72,7 +78,7 @@ def tn_inner_prod(tensor_list1, tensor_list2):
     """
     pass
 
-def random_tn(input_dims, ranks=1):
+def random_network(input_dims, ranks=1):
     """
     Initialize a tensor network with random (normally distributed) cores
 
@@ -81,15 +87,48 @@ def random_tn(input_dims, ranks=1):
         ranks:       Scalar or list of ranks connecting different cores.
                      For scalar inputs, all ranks will be initialized at
                      the specified number, whereas more fine-grained ranks
-                     are specified in the following format:
+                     are specified in the following triangular format:
                      [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}],
-                      ..., [r_{n-1,n}]]
+                      ..., [r_{n-2,n-1}, r_{n-2,n}], [r_{n-1,n}]]
 
     Returns:
         tensor_list: List of randomly initialized and properly formatted
                      tensors encoding our tensor network
     """
-    pass
+    def stdev_fun(shape):
+        """Heuristic function which converts shapes into standard devs"""
+        num_el = np.prod(np.array(shape))
+        return np.sqrt(num_el)
+
+    # Process input and convert input into core shapes
+    num_cores = len(input_dims)
+    if not hasattr(ranks, '__len__'):
+        ranks = [[ranks] * e for e in range(num_cores - 1, 0, -1)]
+    assert len(ranks) == num_cores - 1
+
+    shape_list = unpack_ranks(input_dims, ranks)
+
+    # Use shapes to instantiate random core tensors
+    tensor_list = []
+    for shape in shape_list:
+        tensor_list.append(stdev_fun(shape) * torch.randn(shape))
+
+    return tensor_list
+
+def unpack_ranks(in_dims, ranks):
+    """Converts triangular `ranks` structure to list of tensor shapes"""
+    num_cores = len(in_dims)
+    assert [len(rl) for rl in ranks] == list(range(num_cores - 1, 0, -1))
+
+    shape_list = []
+    for i in range(num_cores):
+        shape = [ranks[j][i-j-1] for j in range(i)]               # Lower triangular
+        shape += [ranks[i][j-i-1] for j in range(i+1, num_cores)] # Upper triangular
+        shape.insert(i, in_dims[i])                               # Diagonals
+        shape_list.append(tuple(shape))
+
+    return shape_list
+
 
 def better_copynode(num_axes, dimension):
     """
