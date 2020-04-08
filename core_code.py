@@ -14,17 +14,13 @@ A tensor network is specified as a list of tensors, each of whose shape is
 formatted in a specific way. In particular, for a network with n tensor
 cores, the shape will be:
 
-tensor_i.shape = (r_1, r_2, ..., r_i, ..., r_n, [batch]),
+tensor_i.shape = (r_1, r_2, ..., r_i, ..., r_n),
 
 where r_j gives the tensor network rank (TN-rank) connecting cores i and j
 when j != i, while r_i gives the dimension of the input to core i. This 
 implies that tensor_i.shape[j] == tensor_j.shape[i], and stacking the 
 shapes of all the tensors in order gives the adjacency matrix of the 
 network (ignoring the diagonals).
-
-The optional batch index allows for multiple networks to be processed in 
-parallel. It's a little bit hackey getting batch inputs to work well with 
-PyTorch and TensorNetwork, but such is life.
 
 On occasion, the ranks are specified in the following triangular format:
      [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}], ...
@@ -35,33 +31,74 @@ On occasion, the ranks are specified in the following triangular format:
 tn.set_default_backend("pytorch")
 torch.set_default_tensor_type(torch.DoubleTensor)
 
-
-def contract_closed_network(tensor_list):
+def contract_network(nodes, contractor='auto'):
     """
-    Contract a closed (no inputs) tensor network to get a scalar
+    Contract a tensor network that has already been 'wired' together
 
     Args:
-        tensor_list: List of (properly formatted) tensors that encodes the
-                     closed tensor network
+        nodes:      One or more nodes in the network of interest. All 
+                    nodes connected to this one will get contracted
+        contractor: Name of the TensorNetwork contractor used to contract
+                    the network. Options include 'greedy', 'optimal', 
+                    'bucket', 'branch', and 'auto' (default)
 
     Returns:
-        scalar:      Scalar output giving the value of contracted network
+        output: Scalar output giving the value of contracted network
     """
-    pass
+    contractor = getattr(tn.contractors, contractor)
+    return contractor(tn.reachable(nodes))
 
-def contract_inputs(tensor_list, input_list):
+def evaluate_input(tensor_list, input_list):
     """
-    Contract input vectors with open tensor network to get closed network
+    Contract input vectors with tensor network to get scalar output
 
     Args:
         tensor_list: List of (properly formatted) tensors that encodes the
                      open tensor network
-        input_list:  List of inputs for each of the cores in our tensor
+        input_list:  List of inputs for each of the cores in our tensor.
+                     When processing a batch of inputs, a list of matrices 
+                     with shapes (batch_dim, input_dim_i) or a single 
+                     tensor with shape (num_cores, batch_dim, input_dim)
+                     can be specified
 
     Returns:
         closed_list: List of tensors that encodes the closed tensor network
     """
-    pass
+    num_cores = len(tensor_list)
+    assert len(input_list) == num_cores
+    assert len(set(len(inp.shape) for inp in input_list)) == 1
+
+    # Get batch information about our input
+    input_shape = input_list[0].shape
+    has_batch = len(input_shape) == 2
+    assert len(input_shape) in (1, 2)
+    if has_batch: 
+        batch_dim = input_shape[0]
+        assert all(i.shape[0] == batch_dim for i in input_list)
+
+        # Generate copy node for dealing with batch dims
+        batch_edges = batch_node(num_cores, batch_dim)
+        assert len(batch_edges) == num_cores + 1
+
+    # Convert all tensor cores to Node objects
+    node_list = [tn.Node(core) for core in tensor_list]
+
+    # Go through and contract all inputs with corresponding cores
+    for i, node, inp in zip(range(num_cores), node_list, input_list):
+        inp_node = tn.Node(inp)
+        node[i] ^ inp_node[int(has_batch)]
+
+        # Explicitly contract batch indices together if we need that
+        if has_batch:
+            inp_node[0] ^ batch_edges[i]
+
+    # Now wire together all internal edges connecting cores
+    for i in range(num_cores):
+        for j in range(i + 1, num_cores):
+            node_list[i][j] ^ node_list[j][i]
+
+    return contract_network(node_list)
+
 
 def tn_inner_prod(tensor_list1, tensor_list2):
     """
@@ -78,7 +115,7 @@ def tn_inner_prod(tensor_list1, tensor_list2):
     """
     pass
 
-def random_network(input_dims, ranks=1):
+def random_tn(input_dims, ranks=1):
     """
     Initialize a tensor network with random (normally distributed) cores
 
@@ -129,25 +166,37 @@ def unpack_ranks(in_dims, ranks):
 
     return shape_list
 
-def better_copynode(num_edges, dimension):
+def verify_formatting(tensor_list):
+    """Check that a tensor list is correctly formatted"""
+    num_cores = len(tensor_list)
+    shape_mat = torch.tensor([core.shape for core in tensor_list])
+    assert torch.all(shape_mat == shape_mat.T)
+
+def batch_node(num_inputs, batch_dim):
     """
-    Return a list of small connected nodes which emulates a large CopyNode
+    Return a network of small CopyNodes which emulates a large CopyNode
+
+    This network is used for reproducing the standard batch functionality 
+    available in PyTorch, and requires connecting the `num_inputs` edges
+    returned by batch_node to the respective batch indices of our inputs.
+    The sole remaining dangling edge will then give the batch index of 
+    whatever contraction occurs later with the input.
 
     Args:
-        num_edges: The number of dangling edges in the output, equivalent 
-                   to the `rank` parameter of CopyNode
-        dimension: The dimension of each of the edges of the output
+        num_inputs: The number of batch indices to contract together
+        batch_dim:  The batch dimension we intend to reproduce
 
     Returns:
-        edge_list: List of edges of our composite CopyNode object
+        edge_list:  List of edges of our composite CopyNode object
     """
     # For small numbers of edges, just use a single CopyNode
+    num_edges = num_inputs + 1
     if num_edges < 4:
-        node = tn.CopyNode(rank=num_edges, dimension=dimension)
+        node = tn.CopyNode(rank=num_edges, dimension=batch_dim)
         return node.get_all_edges()
 
     # Initialize list of free edges with output of trivial identity mats
-    input_node = tn.Node(torch.eye(dimension))
+    input_node = tn.Node(torch.eye(batch_dim))
     edge_list, dummy_list = zip(*[input_node.copy().get_all_edges() 
                                   for _ in range(num_edges)])
 
@@ -160,7 +209,7 @@ def better_copynode(num_edges, dimension):
         # Apply third order tensor to contract two dummy indices together
         temp_list = []
         for i in range(half_len):
-            temp_node = tn.CopyNode(rank=3, dimension=dimension)
+            temp_node = tn.CopyNode(rank=3, dimension=batch_dim)
             temp_node[1] ^ dummy_list[2 * i]
             temp_node[2] ^ dummy_list[2 * i + 1]
             temp_list.append(temp_node[0])
@@ -171,7 +220,7 @@ def better_copynode(num_edges, dimension):
         dummy_len = len(dummy_list)
 
     # Contract the last dummy indices together
-    last_node = tn.CopyNode(rank=dummy_len, dimension=dimension)
+    last_node = tn.CopyNode(rank=dummy_len, dimension=batch_dim)
     [last_node[i] ^ dummy_list[i] for i in range(dummy_len)]
 
     return edge_list
