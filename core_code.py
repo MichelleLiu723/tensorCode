@@ -43,10 +43,11 @@ def contract_network(nodes, contractor='auto'):
                     'bucket', 'branch', and 'auto' (default)
 
     Returns:
-        output: Scalar output giving the value of contracted network
+        output:     PyTorch tensor containing the contracted network, 
+                    which here will always be a scalar or batch vector
     """
     contractor = getattr(tn.contractors, contractor)
-    return contractor(tn.reachable(nodes))
+    return contractor(tn.reachable(nodes)).tensor
 
 def evaluate_input(tensor_list, input_list):
     """
@@ -80,8 +81,8 @@ def evaluate_input(tensor_list, input_list):
         batch_edges = batch_node(num_cores, batch_dim)
         assert len(batch_edges) == num_cores + 1
 
-    # Convert all tensor cores to Node objects
-    node_list = [tn.Node(core) for core in tensor_list]
+    # Convert all tensor cores to list of wired nodes
+    node_list = wire_network(tensor_list)
 
     # Go through and contract all inputs with corresponding cores
     for i, node, inp in zip(range(num_cores), node_list, input_list):
@@ -92,13 +93,7 @@ def evaluate_input(tensor_list, input_list):
         if has_batch:
             inp_node[0] ^ batch_edges[i]
 
-    # Now wire together all internal edges connecting cores
-    for i in range(num_cores):
-        for j in range(i + 1, num_cores):
-            node_list[i][j] ^ node_list[j][i]
-
     return contract_network(node_list)
-
 
 def tn_inner_prod(tensor_list1, tensor_list2):
     """
@@ -113,7 +108,37 @@ def tn_inner_prod(tensor_list1, tensor_list2):
     Returns:
         inner_prod:   Scalar giving inner product between input networks
     """
-    pass
+    num_cores = len(tensor_list1)
+    assert len(tensor_list1) == len(tensor_list2)
+    assert all(tensor_list1[i].shape[i] == tensor_list2[i].shape[i] 
+                for i in range(num_cores))
+
+    # Wire up each of the networks
+    network1 = wire_network(tensor_list1)
+    network2 = wire_network(tensor_list2)
+
+    # Contract all input indices together
+    for i in range(num_cores):
+        network1[i][i] ^ network2[i][i]
+
+    return contract_network(network1 + network2)
+
+def l2_norm(tensor_list):
+    """Compute the Frobenius norm of tensor network"""
+    return torch.sqrt(tn_inner_prod(tensor_list, tensor_list))
+
+def wire_network(tensor_list):
+    """Convert list of tensor cores into fully wired network of TN Nodes"""
+    num_cores = len(tensor_list)
+    verify_formatting(tensor_list)
+
+    # Wire together all internal edges connecting cores
+    node_list = [tn.Node(core) for core in tensor_list]
+    for i in range(num_cores):
+        for j in range(i+1, num_cores):
+            node_list[i][j] ^ node_list[j][i]
+
+    return node_list
 
 def random_tn(input_dims, ranks=1):
     """
@@ -132,13 +157,14 @@ def random_tn(input_dims, ranks=1):
         tensor_list: List of randomly initialized and properly formatted
                      tensors encoding our tensor network
     """
+    num_cores = len(input_dims)
     def stdev_fun(shape):
         """Heuristic function which converts shapes into standard devs"""
+        # Square root of num_core'th root of number of elements in shape
         num_el = np.prod(np.array(shape))
-        return np.sqrt(num_el)
+        return np.exp(np.log(num_el) / (2 * num_cores))
 
     # Process input and convert input into core shapes
-    num_cores = len(input_dims)
     if not hasattr(ranks, '__len__'):
         ranks = [[ranks] * e for e in range(num_cores - 1, 0, -1)]
     assert len(ranks) == num_cores - 1
