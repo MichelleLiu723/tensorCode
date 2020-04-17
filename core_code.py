@@ -226,7 +226,7 @@ def batch_node(num_inputs, batch_dim):
     edge_list, dummy_list = zip(*[input_node.copy().get_all_edges() 
                                   for _ in range(num_edges)])
 
-    # Iteratively contract dummy edges until we have less than 4
+    # Contract dummy edges as a binary tree via third-order tensors
     dummy_len = len(dummy_list)
     while dummy_len > 4:
         odd = dummy_len % 2 == 1
@@ -245,11 +245,151 @@ def batch_node(num_inputs, batch_dim):
         dummy_list = temp_list
         dummy_len = len(dummy_list)
 
-    # Contract the last dummy indices together
+    # Contract the 3 or less dummy indices together
     last_node = tn.CopyNode(rank=dummy_len, dimension=batch_dim)
     [last_node[i] ^ dummy_list[i] for i in range(dummy_len)]
 
     return edge_list
+
+def increase_rank(slim_list, vertex1, vertex2, rank_inc=1, pad_noise=1e-6):
+    """
+    Increase the rank of one bond in a tensor network
+
+    Args:
+        slim_list: List of tensors encoding a tensor network
+        vertex1:   Node number for one end of the edge being increased
+        vertex2:   Node number for the other end of the edge being 
+                   increased, which can't equal vertex1
+        rank_inc:  Amount to increase the rank by (default 1)
+        pad_noise: Increasing the rank involves embedding the original
+                   TN in a larger parameter space, and adding a bit of 
+                   noise (set by pad_noise) helps later in training
+
+    Returns:
+        fat_list:  List of tensors encoding the same network, but with the
+                   rank of the edge connecting nodes vertex1 and vertex2 
+                   increased by rank_inc
+    """
+    num_tensors = len(slim_list)
+    assert 0 <= vertex1 < num_tensors
+    assert 0 <= vertex2 < num_tensors
+    assert rank_inc >= 0
+    assert pad_noise >= 0
+
+    # Function for increasing one index of one tensor
+    def pad_tensor(tensor, ind):
+        shape = list(tensor.shape)
+        shape[ind] = rank_inc
+        pad_mat = torch.randn(shape) * pad_noise
+        return torch.cat([tensor, pad_mat], dim=ind)
+
+    # Pad both of the tensors along the index of the other
+    fat_list = slim_list
+    fat_list[vertex1] = pad_tensor(fat_list[vertex1], vertex2)
+    fat_list[vertex2] = pad_tensor(fat_list[vertex2], vertex1)
+    return fat_list
+
+def num_params(tensor_list):
+    """
+    Get number of parameters associated with a tensor network
+
+    Args:
+        tensor_list: List of tensors encoding a tensor network
+
+    Return:
+        param_count: The number of parameters in the tensor network
+    """
+    return sum(t.numel() for t in tensor_list)
+
+def continuous_optim(tensor_list, train_data, eval_fun, loss_fun, 
+                     optim_args=dict(), epochs=10, val_data=None):
+    """
+    Train a tensor network using gradient descent on input dataset
+
+    Args:
+        tensor_list: List of tensors encoding the network being trained
+        train_data:  The data used to train the network
+        loss_fun:    Scalar-valued loss function of the type 
+                        tens_list, data -> scalar_loss
+                     (This depends on the task being learned)
+        optim_args:  Dictionary of hyperparameters for the optimizer, 
+                     with notable choices including,
+                        optim: Choice of Pytorch optimizer (default='Adam')
+                        lr:    Learning rate for optimizer (default=1e-3)
+        epochs:      Number of epochs to train for. When val_data is given,
+                     setting epochs=None implements early stopping
+        val_data:    The data used for validation
+    
+    Returns:
+        better_list: List of tensors with same shape as tensor_list, but
+                     having been optimized using the appropriate optimizer
+    """
+    # Check input and initialize local record variables
+    early_stopping = epochs is None
+    assert not early_stopping or val_data is not None
+    optim = optim_args['optim'] if 'optim' in optim_args else 'Adam'
+    lr = optim_args['lr'] if 'lr' in optim_args else 1e-3
+    loss_rec, first_loss, best_loss, best_network = [], None, None, None
+
+    # Function to record loss information and return whether to stop
+    def record_loss(new_loss, new_network):
+
+        # Load record variables and check for first/best loss
+        nonlocal loss_rec, first_loss, best_loss, best_network
+        if best_loss is None or new_loss < best_loss:
+            best_loss, best_network = new_loss, new_network
+        if first_loss is None:
+            first_loss = new_loss
+
+        # Check for early stopping and update loss record
+        if len(loss_rec < 2):
+            stop, loss_rec = False, loss_rec + [new_loss]
+        else:
+            stop = new_loss > max(loss_rec)
+            loss_rec = loss_rec[:-1] + [new_loss]
+        return stop
+
+    # Initialize optimizer
+    optim = getattr(torch.optim, optim)(lr=lr)
+
+    # Loop over validation and training for given number of epochs
+    ep = 1
+    while epochs is None or ep <= epochs:
+        print(f"Epoch {ep}")
+        # Evaluate performance of network on the validation data
+        with torch.no_grad():
+            val_loss = []
+            for batch in batchify(val_data):
+                val_loss.append(loss_fun(tensor_list, batch))
+            val_loss = torch.mean(torch.tensor(val_loss))
+            print(f"Val. loss: {val_loss:.3f}")
+
+        # Record average loss and check early stopping condition
+        if record_loss(val_loss, tensor_list):
+            break
+
+        # Train network on all the training data
+        train_loss, num_train = 0., 0
+        for batch in batchify(train_data):
+            loss = loss_fun(tensor_list, batch)
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+
+            num_train += 1
+            train_loss += loss
+
+    return best_model, first_loss, best_loss
+
+def batchify(dataset, batch_size=100):
+    """Convert dataset into iterator over minibatches of data"""
+    ind = 0
+    if dataset is None: return
+    while ind < len(dataset):
+        yield dataset[ind, ind+batch_size]
+        ind += batch_size
+    return
+
 
 ### OLD CODE ###
 

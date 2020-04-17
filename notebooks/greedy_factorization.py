@@ -1,11 +1,5 @@
 #!/usr/bin/env python
 # coding: utf-8
-
-# In[1]:
-
-
-#see notes in blue binder for documents of this. 
-#code was tested on three tensors: A-B-C
 import sys
 import torch
 import torch.optim as optim
@@ -13,15 +7,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.append('..')
-from core_code import (einSum_Contraction, increaseRank, printRank, getNumParams,
-                       computeLoss_Factorization, solve_Continuous)
+from core_code import *
 
 
-# In[2]:
-
-
-# TODO: Add function to core_code that initializes a random tensor with
-#       prescribed input dimensions and ranks
 
 #generate target tensor of rank 1
 X =  torch.Tensor([[[1]],[[2]]])
