@@ -31,7 +31,7 @@ On occasion, the ranks are specified in the following triangular format:
 tn.set_default_backend("pytorch")
 torch.set_default_tensor_type(torch.DoubleTensor)
 
-def contract_network(nodes, contractor='auto'):
+def contract_network(nodes, contractor='auto', edge_order=None):
     """
     Contract a tensor network that has already been 'wired' together
 
@@ -41,32 +41,38 @@ def contract_network(nodes, contractor='auto'):
         contractor: Name of the TensorNetwork contractor used to contract
                     the network. Options include 'greedy', 'optimal', 
                     'bucket', 'branch', and 'auto' (default)
+        edge_order: When expanding to a dense tensor, giving a list of the
+                    dangling edges of the tensor is required to set the
+                    order of the indices of the (large) output tensor
 
     Returns:
         output:     PyTorch tensor containing the contracted network, 
                     which here will always be a scalar or batch vector
     """
     contractor = getattr(tn.contractors, contractor)
-    return contractor(tn.reachable(nodes)).tensor
+    output = contractor(tn.reachable(nodes), output_edge_order=edge_order)
+    return output.tensor
 
-def evaluate_input(tensor_list, input_list):
+def evaluate_input(tensor_rep, input_list):
     """
-    Contract input vectors with tensor network to get scalar output
+    Contract input vectors with large tensor to get scalar output
 
     Args:
-        tensor_list: List of (properly formatted) tensors that encodes the
-                     open tensor network
-        input_list:  List of inputs for each of the cores in our tensor.
-                     When processing a batch of inputs, a list of matrices 
-                     with shapes (batch_dim, input_dim_i) or a single 
-                     tensor with shape (num_cores, batch_dim, input_dim)
-                     can be specified
+        tensor_rep:  Representation of the tensor being contracted. This
+                     can either be a tensor network (list of properly
+                     formatted tensor cores), or a single dense tensor
+        input_list:  Batch of inputs to feed to the cores in our tensor.
+                     This can be either a list of matrices with shapes 
+                     (batch_dim, input_dim_i) or a single PyTorch tensor 
+                     with shape (num_modes, batch_dim, input_dim)
 
     Returns:
-        closed_list: List of tensors that encodes the closed tensor network
+        closed_list: Scalar or batch tensor giving output of contraction
+                     between tensor network and input data
     """
-    num_cores = len(tensor_list)
-    assert len(input_list) == num_cores
+    num_modes = len(tensor_rep)
+    assert len(input_list) == num_modes
+    assert isinstance(tensor_rep, (list, torch.Tensor))
     assert len(set(len(inp.shape) for inp in input_list)) == 1
 
     # Get batch information about our input
@@ -78,14 +84,14 @@ def evaluate_input(tensor_list, input_list):
         assert all(i.shape[0] == batch_dim for i in input_list)
 
         # Generate copy node for dealing with batch dims
-        batch_edges = batch_node(num_cores, batch_dim)
-        assert len(batch_edges) == num_cores + 1
+        batch_edges = batch_node(num_modes, batch_dim)
+        assert len(batch_edges) == num_modes + 1
 
     # Convert all tensor cores to list of wired nodes
-    node_list = wire_network(tensor_list)
+    node_list = wire_network(tensor_rep)
 
     # Go through and contract all inputs with corresponding cores
-    for i, node, inp in zip(range(num_cores), node_list, input_list):
+    for i, node, inp in zip(range(num_modes), node_list, input_list):
         inp_node = tn.Node(inp)
         node[i] ^ inp_node[int(has_batch)]
 
@@ -127,10 +133,24 @@ def l2_norm(tensor_list):
     """Compute the Frobenius norm of tensor network"""
     return torch.sqrt(tn_inner_prod(tensor_list, tensor_list))
 
-def wire_network(tensor_list):
-    """Convert list of tensor cores into fully wired network of TN Nodes"""
+def l2_distance(tensor_list1, tensor_list2):
+    """
+    Compute L2 distance between two tensor networks with same input dims
+    """
+    norm1, norm2 = l2_norm(tensor_list1), l2_norm(tensor_list2)
+    inner_prod = tn_inner_prod(tensor_list1, tensor_list2)
+
+    return torch.sqrt(norm1**2 + norm2**2 - 2*inner_prod)
+
+def wire_network(tensor_list, give_dense=False):
+    """
+    Convert list of tensor cores into fully wired network of TN Nodes
+
+    If give_dense=True, the wired network is contracted together and a 
+    single (large) tensor is returned
+    """
     num_cores = len(tensor_list)
-    verify_formatting(tensor_list)
+    assert valid_formatting(tensor_list)
 
     # Wire together all internal edges connecting cores
     node_list = [tn.Node(core) for core in tensor_list]
@@ -138,7 +158,12 @@ def wire_network(tensor_list):
         for j in range(i+1, num_cores):
             node_list[i][j] ^ node_list[j][i]
 
-    return node_list
+    # 
+    if give_dense:
+        edge_order = [node[i] for i, node in enumerate(node_list)]
+        return contract_network(node_list, edge_order=edge_order)
+    else:
+        return node_list
 
 def random_tn(input_dims, ranks=1):
     """
@@ -178,6 +203,21 @@ def random_tn(input_dims, ranks=1):
 
     return tensor_list
 
+def generate_data(tensor_list, dataset_size, noise=1e-3):
+    """
+    Use a target tensor network to get pair of batch (input, output) data
+
+    Args:
+        tensor_list:  List of tensors encoding a target tensor network,
+                      which is used to generate the data
+        dataset_size: 
+        noise:
+
+    Return:
+        dataset:      
+    """
+    pass
+
 def unpack_ranks(in_dims, ranks):
     """Converts triangular `ranks` structure to list of tensor shapes"""
     num_cores = len(in_dims)
@@ -192,11 +232,15 @@ def unpack_ranks(in_dims, ranks):
 
     return shape_list
 
-def verify_formatting(tensor_list):
-    """Check that a tensor list is correctly formatted"""
+def valid_formatting(tensor_list):
+    """Check if a tensor list is correctly formatted"""
     num_cores = len(tensor_list)
-    shape_mat = torch.tensor([core.shape for core in tensor_list])
-    assert torch.all(shape_mat == shape_mat.T)
+    try:
+        shape_mat = torch.tensor([core.shape for core in tensor_list])
+        assert torch.all(shape_mat == shape_mat.T)
+        return True
+    except:
+        return False
 
 def batch_node(num_inputs, batch_dim):
     """
@@ -301,7 +345,7 @@ def num_params(tensor_list):
     """
     return sum(t.numel() for t in tensor_list)
 
-def continuous_optim(tensor_list, train_data, eval_fun, loss_fun, 
+def continuous_optim(tensor_list, train_data, loss_fun, 
                      optim_args=dict(), epochs=10, val_data=None):
     """
     Train a tensor network using gradient descent on input dataset
@@ -333,16 +377,14 @@ def continuous_optim(tensor_list, train_data, eval_fun, loss_fun,
 
     # Function to record loss information and return whether to stop
     def record_loss(new_loss, new_network):
-
         # Load record variables and check for first/best loss
         nonlocal loss_rec, first_loss, best_loss, best_network
         if best_loss is None or new_loss < best_loss:
             best_loss, best_network = new_loss, new_network
         if first_loss is None:
             first_loss = new_loss
-
         # Check for early stopping and update loss record
-        if len(loss_rec < 2):
+        if len(loss_rec) < 2:   # Change 2 to alter early stopping window
             stop, loss_rec = False, loss_rec + [new_loss]
         else:
             stop = new_loss > max(loss_rec)
@@ -350,46 +392,105 @@ def continuous_optim(tensor_list, train_data, eval_fun, loss_fun,
         return stop
 
     # Initialize optimizer
-    optim = getattr(torch.optim, optim)(lr=lr)
+    optim = getattr(torch.optim, optim)(tensor_list, lr=lr)
 
     # Loop over validation and training for given number of epochs
     ep = 1
     while epochs is None or ep <= epochs:
-        print(f"Epoch {ep}")
+        print(f"  EPOCH {ep}")
         # Evaluate performance of network on the validation data
         with torch.no_grad():
             val_loss = []
             for batch in batchify(val_data):
                 val_loss.append(loss_fun(tensor_list, batch))
-            val_loss = torch.mean(torch.tensor(val_loss))
-            print(f"Val. loss: {val_loss:.3f}")
+                print(val_loss)
+            # We might not have received any 
+            if len(val_loss) > 1:
+                val_loss = torch.mean(torch.tensor(val_loss))
+                print(f"    Val. loss:  {val_loss:.3f}")
 
         # Record average loss and check early stopping condition
-        if record_loss(val_loss, tensor_list):
-            break
+        if record_loss(val_loss, tensor_list): break
 
         # Train network on all the training data
         train_loss, num_train = 0., 0
         for batch in batchify(train_data):
             loss = loss_fun(tensor_list, batch)
             optim.zero_grad()
+            print(loss)
             loss.backward()
             optim.step()
 
             num_train += 1
             train_loss += loss
+        print(f"    Train loss: {val_loss:.3f}")
 
     return best_model, first_loss, best_loss
 
-def batchify(dataset, batch_size=100):
-    """Convert dataset into iterator over minibatches of data"""
-    ind = 0
-    if dataset is None: return
-    while ind < len(dataset):
-        yield dataset[ind, ind+batch_size]
-        ind += batch_size
-    return
+def loss_tensor_recovery(tensor_list, target_tensor):
+    """
+    Compute the L2 distance between our tensor network and a target network
+    """
+    return l2_distance(tensor_list, target_tensor)
 
+def loss_regression(tensor_list, dataset):
+    """
+    Compute the L2 distance between target values and output of tensor 
+    network when given input values
+
+    Args:
+        tensor_list: List of tensors encoding a tensor network
+        dataset:     Tuple of the form (input_list, targets), where
+                     input_list is formatted as the corresponding argument
+                     of `evaluate_input` (see there), and targets is a 
+                     PyTorch vector containing target values
+
+    Returns:
+        loss:        The L2 distance between targets and the contraction
+                     of our network with the data in input_list
+    """
+    # Unpack dataset and evaluate inputs using tensor network
+    input_list, targets = dataset
+    outputs = evaluate_input(tensor_list, input_list)
+
+    return torch.dist(targets, outputs)
+
+@torch.no_grad()
+def batchify(dataset, batch_size=100):
+    """
+    Convert dataset into iterator over minibatches of data
+
+    The nature of this iteration depends on the task at hand, so batchify
+    should be modified when new tasks are proposed. Currently supported
+    options are tensor recover and regression
+    """
+    # Figure out which task we're dealing with
+    if dataset is None: return  # Trivial input data with no iteration
+    elif isinstance(dataset, list) and valid_formatting(dataset):
+        task = 'recovery'
+    elif len(dataset) == 2 and isinstance(dataset[0][0], torch.Tensor):
+        task = 'regression'
+        inputs, targets = dataset
+        tensor_input = isinstance(inputs, torch.Tensor)
+    else:
+        raise NotImplementedError
+
+    # For tensor recovery, just give the target tensor
+    if task == 'recovery':
+        yield dataset
+        return
+
+    # For regression, return minibatches of (input, target) data
+    elif task == 'regression':
+        ind = 0
+        while ind < len(dataset):
+            inp = [ip[ind: ind+batch_size] for ip in inputs]
+            if tensor_input: inp = torch.tensor(inp)
+            tar = targets[ind: ind+batch_size]
+            ind += batch_size
+
+            yield inp, tar
+        return
 
 ### OLD CODE ###
 
