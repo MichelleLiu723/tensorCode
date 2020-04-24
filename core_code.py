@@ -72,7 +72,7 @@ def evaluate_input(tensor_rep, input_list):
     """
     num_modes = len(tensor_rep)
     assert len(input_list) == num_modes
-    assert isinstance(tensor_rep, (list, torch.Tensor))
+    assert isinstance(tensor_rep, (tuple, list, torch.Tensor))
     assert len(set(len(inp.shape) for inp in input_list)) == 1
 
     # Get batch information about our input
@@ -165,13 +165,13 @@ def wire_network(tensor_list, give_dense=False):
     else:
         return node_list
 
-def random_tn(input_dims, ranks=1):
+def random_tn(input_dims, rank=1):
     """
     Initialize a tensor network with random (normally distributed) cores
 
     Args:
         input_dims:  List of input dimensions for each core in the network
-        ranks:       Scalar or list of ranks connecting different cores.
+        rank:        Scalar or list of rank connecting different cores.
                      For scalar inputs, all ranks will be initialized at
                      the specified number, whereas more fine-grained ranks
                      are specified in the following triangular format:
@@ -186,15 +186,15 @@ def random_tn(input_dims, ranks=1):
     def stdev_fun(shape):
         """Heuristic function which converts shapes into standard devs"""
         # Square root of num_core'th root of number of elements in shape
-        num_el = np.prod(np.array(shape))
-        return np.exp(np.log(num_el) / (2 * num_cores))
+        num_el = torch.prod(torch.tensor(shape)).to(dtype=torch.float)
+        return torch.exp(torch.log(num_el) / (2 * num_cores))
 
     # Process input and convert input into core shapes
-    if not hasattr(ranks, '__len__'):
-        ranks = [[ranks] * e for e in range(num_cores - 1, 0, -1)]
-    assert len(ranks) == num_cores - 1
+    if not hasattr(rank, '__len__'):
+        rank = [[rank] * e for e in range(num_cores - 1, 0, -1)]
+    assert len(rank) == num_cores - 1
 
-    shape_list = unpack_ranks(input_dims, ranks)
+    shape_list = unpack_ranks(input_dims, rank)
 
     # Use shapes to instantiate random core tensors
     tensor_list = []
@@ -202,6 +202,17 @@ def random_tn(input_dims, ranks=1):
         tensor_list.append(stdev_fun(shape) * torch.randn(shape))
 
     return tensor_list
+
+make_trainable = lambda tensor_list: [t.requires_grad_() 
+                                      for t in tensor_list]
+make_trainable.__doc__ = "Returns trainable version of tensor list"
+
+def copy_network(tensor_list): 
+    """Returns detached copy of tensor list"""
+    my_copy = [t.clone().detach() for t in tensor_list]
+    my_copy = [ct.requires_grad_() if t.requires_grad else ct 
+               for t, ct in zip(tensor_list, my_copy)]
+    return my_copy
 
 def generate_data(tensor_list, dataset_size, noise=1e-3):
     """
@@ -231,6 +242,11 @@ def unpack_ranks(in_dims, ranks):
         shape_list.append(tuple(shape))
 
     return shape_list
+
+def print_ranks(tensor_list):
+    """Print out the ranks of edges in tensor network"""
+    all_shapes = np.array([t.shape for t in tensor_list])
+    print(np.triu(all_shapes))
 
 def valid_formatting(tensor_list):
     """Check if a tensor list is correctly formatted"""
@@ -345,8 +361,8 @@ def num_params(tensor_list):
     """
     return sum(t.numel() for t in tensor_list)
 
-def continuous_optim(tensor_list, train_data, loss_fun, 
-                     optim_args=dict(), epochs=10, val_data=None):
+def continuous_optim(tensor_list, train_data, loss_fun, epochs=10, 
+                     val_data=None, other_args=dict()):
     """
     Train a tensor network using gradient descent on input dataset
 
@@ -356,24 +372,34 @@ def continuous_optim(tensor_list, train_data, loss_fun,
         loss_fun:    Scalar-valued loss function of the type 
                         tens_list, data -> scalar_loss
                      (This depends on the task being learned)
-        optim_args:  Dictionary of hyperparameters for the optimizer, 
-                     with notable choices including,
-                        optim: Choice of Pytorch optimizer (default='Adam')
-                        lr:    Learning rate for optimizer (default=1e-3)
         epochs:      Number of epochs to train for. When val_data is given,
                      setting epochs=None implements early stopping
         val_data:    The data used for validation
+        other_args:  Dictionary of other arguments for the optimization, 
+                     with some options below (feel free to add more)
+
+                        optim: Choice of Pytorch optimizer (default='Adam')
+                        lr:    Learning rate for optimizer (default=1e-3)
+                        reps:  Number of times to repeat 
+                               training data per epoch     (default=1)
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
                      having been optimized using the appropriate optimizer
     """
     # Check input and initialize local record variables
+    has_val = val_data is not None
     early_stopping = epochs is None
-    assert not early_stopping or val_data is not None
-    optim = optim_args['optim'] if 'optim' in optim_args else 'Adam'
-    lr = optim_args['lr'] if 'lr' in optim_args else 1e-3
+    optim = other_args['optim'] if 'optim' in other_args else 'Adam'
+    lr    = other_args['lr']    if 'lr'    in other_args else 1e-3
+    reps  = other_args['reps']  if 'reps'  in other_args else 1
+    if early_stopping and not has_val:
+        raise ValueError("Early stopping (epochs=None) requires val_data "
+                         "to be input")
     loss_rec, first_loss, best_loss, best_network = [], None, None, None
+
+    # Copy tensor_list so the original is unchanged
+    tensor_list = copy_network(tensor_list)
 
     # Function to record loss information and return whether to stop
     def record_loss(new_loss, new_network):
@@ -389,6 +415,7 @@ def continuous_optim(tensor_list, train_data, loss_fun,
         else:
             stop = new_loss > max(loss_rec)
             loss_rec = loss_rec[:-1] + [new_loss]
+
         return stop
 
     # Initialize optimizer
@@ -401,35 +428,45 @@ def continuous_optim(tensor_list, train_data, loss_fun,
         # Evaluate performance of network on the validation data
         with torch.no_grad():
             val_loss = []
+
+            # Note that `batchify` uses different logic for different types
+            # of input, so update that when you work on tensor completion
             for batch in batchify(val_data):
                 val_loss.append(loss_fun(tensor_list, batch))
-                print(val_loss)
-            # We might not have received any 
-            if len(val_loss) > 1:
+            if has_val:
                 val_loss = torch.mean(torch.tensor(val_loss))
-                print(f"    Val. loss:  {val_loss:.3f}")
+                print(f"    Val. loss:  {val_loss.data:.3f}")
 
         # Record average loss and check early stopping condition
-        if record_loss(val_loss, tensor_list): break
+        if has_val and record_loss(val_loss, tensor_list): break
 
         # Train network on all the training data
         train_loss, num_train = 0., 0
-        for batch in batchify(train_data):
+        for batch in batchify(train_data, reps=reps):
             loss = loss_fun(tensor_list, batch)
             optim.zero_grad()
-            print(loss)
             loss.backward()
             optim.step()
 
-            num_train += 1
-            train_loss += loss
-        print(f"    Train loss: {val_loss:.3f}")
+            with torch.no_grad():
+                num_train += 1
+                train_loss += loss
+        ep += 1
+        train_loss /= num_train
+        print(f"    Train loss: {train_loss.data:.3f}")
 
-    return best_model, first_loss, best_loss
+        # Record training loss only if we don't have validation data
+        record_loss(train_loss, tensor_list)
+
+    return best_network, first_loss, best_loss
 
 def loss_tensor_recovery(tensor_list, target_tensor):
     """
     Compute the L2 distance between our tensor network and a target network
+
+    Args:
+        tensor_list:
+
     """
     return l2_distance(tensor_list, target_tensor)
 
@@ -456,7 +493,7 @@ def loss_regression(tensor_list, dataset):
     return torch.dist(targets, outputs)
 
 @torch.no_grad()
-def batchify(dataset, batch_size=100):
+def batchify(dataset, batch_size=100, reps=1):
     """
     Convert dataset into iterator over minibatches of data
 
@@ -475,24 +512,26 @@ def batchify(dataset, batch_size=100):
     else:
         raise NotImplementedError
 
-    # For tensor recovery, just give the target tensor
-    if task == 'recovery':
-        yield dataset
-        return
+    # Loop until reps is 0
+    while reps > 0:
+        # For tensor recovery, just give the target tensor
+        if task == 'recovery':
+            yield dataset
 
-    # For regression, return minibatches of (input, target) data
-    elif task == 'regression':
-        ind = 0
-        while ind < len(dataset):
-            inp = [ip[ind: ind+batch_size] for ip in inputs]
-            if tensor_input: inp = torch.tensor(inp)
-            tar = targets[ind: ind+batch_size]
-            ind += batch_size
+        # For regression, return minibatches of (input, target) data
+        elif task == 'regression':
+            ind = 0
+            while ind < len(dataset):
+                inp = [ip[ind: ind+batch_size] for ip in inputs]
+                if tensor_input: inp = torch.tensor(inp)
+                tar = targets[ind: ind+batch_size]
+                ind += batch_size
 
-            yield inp, tar
-        return
+                yield inp, tar
+        reps = reps - 1
+    return
 
-### OLD CODE ###
+### OLDER CODE ###
 
 def get_repeated_Indices(list_of_indices):
     #input: string of indices for the tensors. 
