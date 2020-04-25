@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
+import time
 import random
-from functools import reduce
+from functools import partial, reduce
 
 import torch
 import numpy as np
@@ -214,20 +215,44 @@ def copy_network(tensor_list):
                for t, ct in zip(tensor_list, my_copy)]
     return my_copy
 
-def generate_data(tensor_list, dataset_size, noise=1e-3):
+def generate_data(tensor_list, batch_dim, noise=1e-3):
     """
     Use a target tensor network to get pair of batch (input, output) data
 
     Args:
-        tensor_list:  List of tensors encoding a target tensor network,
-                      which is used to generate the data
-        dataset_size: 
-        noise:
+        tensor_list: List of tensors encoding a target tensor network,
+                     which is used to generate the data
+        batch_dim:   The number of inputs and outputs to generate
+        noise:       Stdev of Guassian noise to add to real output value
 
     Return:
-        dataset:      
+        rand_ins:    List of matrices, with i'th entry having shape
+                     (batch_dim, input_dim_i), with input_dim_i being the 
+                     i'th visible dimension of tensor_list
+        rand_out:    Vector of length batch_dim holding noisy outputs
     """
-    pass
+    num_cores = len(tensor_list)
+    indims = get_indims(tensor_list)
+    rand_ins = [torch.randn((batch_dim, d)) / torch.sqrt(d.float()) 
+                    for d in indims]
+        
+    # Convert into tensors when possible
+    if len(set(indims)) == 1:
+        rand_ins = torch.tensor(rand_ins)
+
+    # Produce outputs in small batches
+    eval_fun = partial(evaluate_input, tensor_list)
+    num, mini_size, rand_out = 0, 50, []
+    start = time.time()
+    while num < batch_dim:
+        this_in = [r_in[num:num+mini_size] for r_in in rand_ins]
+        rand_out.append(evaluate_input(tensor_list, this_in))
+        num += mini_size
+
+    rand_out = torch.cat(rand_out)
+    print(f"{time.time() - start:.2f} sec")
+
+    return rand_ins, rand_out
 
 def unpack_ranks(in_dims, ranks):
     """Converts triangular `ranks` structure to list of tensor shapes"""
@@ -245,8 +270,13 @@ def unpack_ranks(in_dims, ranks):
 
 def print_ranks(tensor_list):
     """Print out the ranks of edges in tensor network"""
-    all_shapes = np.array([t.shape for t in tensor_list])
-    print(np.triu(all_shapes))
+    all_shapes = torch.tensor([t.shape for t in tensor_list])
+    print(torch.triu(all_shapes))
+
+def get_indims(tensor_list):
+    """Return the input dimensions of nodes in tensor network"""
+    all_shapes = torch.tensor([t.shape for t in tensor_list])
+    return tuple(s[i] for i, s in enumerate(all_shapes))
 
 def valid_formatting(tensor_list):
     """Check if a tensor list is correctly formatted"""
@@ -378,10 +408,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
         other_args:  Dictionary of other arguments for the optimization, 
                      with some options below (feel free to add more)
 
-                        optim: Choice of Pytorch optimizer (default='Adam')
+                        optim: Choice of Pytorch optimizer (default='SGD')
                         lr:    Learning rate for optimizer (default=1e-3)
                         reps:  Number of times to repeat 
                                training data per epoch     (default=1)
+                        print: Whether to print info       (default=True)
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
@@ -390,9 +421,10 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     # Check input and initialize local record variables
     has_val = val_data is not None
     early_stopping = epochs is None
-    optim = other_args['optim'] if 'optim' in other_args else 'Adam'
+    optim = other_args['optim'] if 'optim' in other_args else 'SGD'
     lr    = other_args['lr']    if 'lr'    in other_args else 1e-3
     reps  = other_args['reps']  if 'reps'  in other_args else 1
+    prnt  = other_args['print'] if 'print' in other_args else True
     if early_stopping and not has_val:
         raise ValueError("Early stopping (epochs=None) requires val_data "
                          "to be input")
@@ -424,7 +456,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     # Loop over validation and training for given number of epochs
     ep = 1
     while epochs is None or ep <= epochs:
-        print(f"  EPOCH {ep}")
+        if prnt: print(f"  EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}")
         # Evaluate performance of network on the validation data
         with torch.no_grad():
             val_loss = []
@@ -435,7 +467,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 val_loss.append(loss_fun(tensor_list, batch))
             if has_val:
                 val_loss = torch.mean(torch.tensor(val_loss))
-                print(f"    Val. loss:  {val_loss.data:.3f}")
+                if prnt: print(f"    Val. loss:  {val_loss.data:.3f}")
 
         # Record average loss and check early stopping condition
         if has_val and record_loss(val_loss, tensor_list): break
@@ -453,7 +485,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 train_loss += loss
         ep += 1
         train_loss /= num_train
-        print(f"    Train loss: {train_loss.data:.3f}")
+        if prnt: print(f"    Train loss: {train_loss.data:.3f}")
 
         # Record training loss only if we don't have validation data
         record_loss(train_loss, tensor_list)
