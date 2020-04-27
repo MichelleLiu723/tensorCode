@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-# coding: utf-8
-import time
 import random
 from functools import partial, reduce
 
@@ -175,7 +173,8 @@ def random_tn(input_dims, rank=1):
         rank:        Scalar or list of rank connecting different cores.
                      For scalar inputs, all ranks will be initialized at
                      the specified number, whereas more fine-grained ranks
-                     are specified in the following triangular format:
+                     are specified via a square matrix, or in the 
+                     following triangular format:
                      [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}],
                       ..., [r_{n-2,n-1}, r_{n-2,n}], [r_{n-1,n}]]
 
@@ -215,7 +214,7 @@ def copy_network(tensor_list):
                for t, ct in zip(tensor_list, my_copy)]
     return my_copy
 
-def generate_data(tensor_list, batch_dim, noise=1e-3):
+def generate_regression_data(tensor_list, batch_dim, noise=1e-3):
     """
     Use a target tensor network to get pair of batch (input, output) data
 
@@ -232,7 +231,7 @@ def generate_data(tensor_list, batch_dim, noise=1e-3):
         rand_out:    Vector of length batch_dim holding noisy outputs
     """
     num_cores = len(tensor_list)
-    indims = get_indims(tensor_list)
+    indims = torch.tensor(get_indims(tensor_list))
     rand_ins = [torch.randn((batch_dim, d)) / torch.sqrt(d.float()) 
                     for d in indims]
         
@@ -243,14 +242,11 @@ def generate_data(tensor_list, batch_dim, noise=1e-3):
     # Produce outputs in small batches
     eval_fun = partial(evaluate_input, tensor_list)
     num, mini_size, rand_out = 0, 50, []
-    start = time.time()
     while num < batch_dim:
         this_in = [r_in[num:num+mini_size] for r_in in rand_ins]
         rand_out.append(evaluate_input(tensor_list, this_in))
         num += mini_size
-
     rand_out = torch.cat(rand_out)
-    print(f"{time.time() - start:.2f} sec")
 
     return rand_ins, rand_out
 
@@ -276,7 +272,7 @@ def print_ranks(tensor_list):
 def get_indims(tensor_list):
     """Return the input dimensions of nodes in tensor network"""
     all_shapes = torch.tensor([t.shape for t in tensor_list])
-    return tuple(s[i] for i, s in enumerate(all_shapes))
+    return tuple(int(s[i]) for i, s in enumerate(all_shapes))
 
 def valid_formatting(tensor_list):
     """Check if a tensor list is correctly formatted"""
@@ -488,11 +484,12 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
         if prnt: print(f"    Train loss: {train_loss.data:.3f}")
 
         # Record training loss only if we don't have validation data
-        record_loss(train_loss, tensor_list)
+        if not has_val: record_loss(train_loss, tensor_list)
 
+    if prnt: print()
     return best_network, first_loss, best_loss
 
-def loss_tensor_recovery(tensor_list, target_tensor):
+def tensor_recovery_loss(tensor_list, target_tensor):
     """
     Compute the L2 distance between our tensor network and a target network
 
@@ -502,7 +499,7 @@ def loss_tensor_recovery(tensor_list, target_tensor):
     """
     return l2_distance(tensor_list, target_tensor)
 
-def loss_regression(tensor_list, dataset):
+def regression_loss(tensor_list, dataset):
     """
     Compute the L2 distance between target values and output of tensor 
     network when given input values
