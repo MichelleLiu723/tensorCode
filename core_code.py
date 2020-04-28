@@ -57,9 +57,11 @@ def evaluate_input(tensor_rep, input_list):
     Contract input vectors with large tensor to get scalar output
 
     Args:
-        tensor_rep:  Representation of the tensor being contracted. This
-                     can either be a tensor network (list of properly
-                     formatted tensor cores), or a single dense tensor
+        tensor_rep:  The tensor network whose input indices are being 
+                     contracted. This currently only supports TN input 
+                     (i.e. list of properly formatted tensor cores), but
+                     please ask if you want support for inputs that are
+                     specified as one big dense tensor
         input_list:  Batch of inputs to feed to the cores in our tensor.
                      This can be either a list of matrices with shapes 
                      (batch_dim, input_dim_i) or a single PyTorch tensor 
@@ -82,7 +84,7 @@ def evaluate_input(tensor_rep, input_list):
         batch_dim = input_shape[0]
         assert all(i.shape[0] == batch_dim for i in input_list)
 
-        # Generate copy node for dealing with batch dims
+        # Generate batch node for dealing with batch dims
         batch_edges = batch_node(num_modes, batch_dim)
         assert len(batch_edges) == num_modes + 1
 
@@ -157,12 +159,17 @@ def wire_network(tensor_list, give_dense=False):
         for j in range(i+1, num_cores):
             node_list[i][j] ^ node_list[j][i]
 
-    # 
     if give_dense:
         edge_order = [node[i] for i, node in enumerate(node_list)]
         return contract_network(node_list, edge_order=edge_order)
     else:
         return node_list
+
+def expand_network(tensor_list):
+    """
+    Contract all cores of a tensor network together, yielding dense tensor
+    """
+    return wire_network(tensor_list, give_dense=True)
 
 def random_tn(input_dims, rank=1):
     """
@@ -214,7 +221,7 @@ def copy_network(tensor_list):
                for t, ct in zip(tensor_list, my_copy)]
     return my_copy
 
-def generate_regression_data(tensor_list, batch_dim, noise=1e-3):
+def generate_regression_data(tensor_list, batch_dim, noise=1e-5):
     """
     Use a target tensor network to get pair of batch (input, output) data
 
@@ -247,6 +254,9 @@ def generate_regression_data(tensor_list, batch_dim, noise=1e-3):
         rand_out.append(evaluate_input(tensor_list, this_in))
         num += mini_size
     rand_out = torch.cat(rand_out)
+
+    # Add noise to output data
+    rand_out += noise * torch.randn_like(rand_out)
 
     return rand_ins, rand_out
 
@@ -406,6 +416,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
 
                         optim: Choice of Pytorch optimizer (default='SGD')
                         lr:    Learning rate for optimizer (default=1e-3)
+                        bsize: Minibatch size for training (default=100)
                         reps:  Number of times to repeat 
                                training data per epoch     (default=1)
                         print: Whether to print info       (default=True)
@@ -415,36 +426,63 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                      having been optimized using the appropriate optimizer
     """
     # Check input and initialize local record variables
+    early_stop = epochs is None
     has_val = val_data is not None
-    early_stopping = epochs is None
     optim = other_args['optim'] if 'optim' in other_args else 'SGD'
     lr    = other_args['lr']    if 'lr'    in other_args else 1e-3
+    bsize = other_args['bsize'] if 'bsize' in other_args else 100
     reps  = other_args['reps']  if 'reps'  in other_args else 1
     prnt  = other_args['print'] if 'print' in other_args else True
-    if early_stopping and not has_val:
+    if early_stop and not has_val:
         raise ValueError("Early stopping (epochs=None) requires val_data "
                          "to be input")
     loss_rec, first_loss, best_loss, best_network = [], None, None, None
 
-    # Copy tensor_list so the original is unchanged
-    tensor_list = copy_network(tensor_list)
+    # Function to maybe print, conditioned on `prnt`
+    m_print = lambda s: print(s) if prnt else None
 
     # Function to record loss information and return whether to stop
     def record_loss(new_loss, new_network):
-        # Load record variables and check for first/best loss
+        # Load record variables from outer scope
         nonlocal loss_rec, first_loss, best_loss, best_network
+
+        # Check for first and best loss
         if best_loss is None or new_loss < best_loss:
             best_loss, best_network = new_loss, new_network
         if first_loss is None:
             first_loss = new_loss
-        # Check for early stopping and update loss record
-        if len(loss_rec) < 2:   # Change 2 to alter early stopping window
+
+        # Update loss record and check for early stopping
+        window = 2      # Number of epochs record for early stopping
+        if len(loss_rec) < window:
             stop, loss_rec = False, loss_rec + [new_loss]
         else:
+            # stop = new_loss > sum(loss_rec)/len(loss_rec)
             stop = new_loss > max(loss_rec)
-            loss_rec = loss_rec[:-1] + [new_loss]
+            loss_rec = loss_rec[1:] + [new_loss]
 
         return stop
+
+    # Function to run TN on validation data
+    @torch.no_grad()
+    def run_val(t_list):
+        val_loss = []
+
+        # Note that `batchify` uses different logic for different types
+        # of input, so update batchify when you work on tensor completion
+        for batch in batchify(val_data):
+            val_loss.append(loss_fun(t_list, batch))
+        if has_val:
+            val_loss = torch.mean(torch.tensor(val_loss))
+            m_print(f"    Val. loss:  {val_loss.data:.3f}")
+
+        return val_loss
+
+    # Copy tensor_list so the original is unchanged
+    tensor_list = copy_network(tensor_list)
+
+    # Record the initial validation loss (if we validation dataset)
+    if has_val: record_loss(run_val(tensor_list), tensor_list)
 
     # Initialize optimizer
     optim = getattr(torch.optim, optim)(tensor_list, lr=lr)
@@ -452,25 +490,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     # Loop over validation and training for given number of epochs
     ep = 1
     while epochs is None or ep <= epochs:
-        if prnt: print(f"  EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}")
-        # Evaluate performance of network on the validation data
-        with torch.no_grad():
-            val_loss = []
-
-            # Note that `batchify` uses different logic for different types
-            # of input, so update that when you work on tensor completion
-            for batch in batchify(val_data):
-                val_loss.append(loss_fun(tensor_list, batch))
-            if has_val:
-                val_loss = torch.mean(torch.tensor(val_loss))
-                if prnt: print(f"    Val. loss:  {val_loss.data:.3f}")
-
-        # Record average loss and check early stopping condition
-        if has_val and record_loss(val_loss, tensor_list): break
+        m_print(f"  EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}")
 
         # Train network on all the training data
         train_loss, num_train = 0., 0
-        for batch in batchify(train_data, reps=reps):
+        for batch in batchify(train_data, batch_size=bsize, reps=reps):
             loss = loss_fun(tensor_list, batch)
             optim.zero_grad()
             loss.backward()
@@ -479,14 +503,21 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             with torch.no_grad():
                 num_train += 1
                 train_loss += loss
-        ep += 1
         train_loss /= num_train
-        if prnt: print(f"    Train loss: {train_loss.data:.3f}")
+        m_print(f"    Train loss: {train_loss.data:.3f}")
 
-        # Record training loss only if we don't have validation data
-        if not has_val: record_loss(train_loss, tensor_list)
+        # Get validation loss if we have it, otherwise record training loss
+        if has_val:
+            # Get and record validation loss, check early stopping condition
+            val_loss = run_val(tensor_list)
+            if record_loss(val_loss, tensor_list) and early_stop:
+                m_print(f"Early stopping condition reached")
+                break
+        else:
+            record_loss(train_loss, tensor_list)
+        ep += 1
+    m_print("")
 
-    if prnt: print()
     return best_network, first_loss, best_loss
 
 def tensor_recovery_loss(tensor_list, target_tensor):
