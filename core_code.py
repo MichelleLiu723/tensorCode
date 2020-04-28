@@ -420,10 +420,28 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                         reps:  Number of times to repeat 
                                training data per epoch     (default=1)
                         print: Whether to print info       (default=True)
+                        hist:  Whether to return losses
+                               from train and val sets     (default=False)
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
-                     having been optimized using the appropriate optimizer
+                     having been optimized using the appropriate optimizer.
+                     When validation data is given, the model with the 
+                     lowest validation loss is output, otherwise the model
+                     with lowest training loss
+        first_loss:  Initial loss of the model on the validation set, 
+                     before any training. If no val set is provided, the
+                     first training loss is instead returned
+        best_loss:   The value of the validation/training loss for the
+                     model output as better_list
+        loss_record: If hist=True in other_args, history of all validation
+                     and training losses is returned as a tuple of Pytorch
+                     vectors (train_loss, val_loss), with each vector
+                     having length equal to number of epochs of training.
+                     When no validation loss is provided, the second item
+                     (val_loss) is an empty tensor.
+
+
     """
     # Check input and initialize local record variables
     early_stop = epochs is None
@@ -433,16 +451,18 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     bsize = other_args['bsize'] if 'bsize' in other_args else 100
     reps  = other_args['reps']  if 'reps'  in other_args else 1
     prnt  = other_args['print'] if 'print' in other_args else True
+    hist  = other_args['hist']  if 'hist'  in other_args else False
     if early_stop and not has_val:
         raise ValueError("Early stopping (epochs=None) requires val_data "
                          "to be input")
     loss_rec, first_loss, best_loss, best_network = [], None, None, None
+    if hist: loss_record = ([], [])    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `prnt`
     m_print = lambda s: print(s) if prnt else None
 
     # Function to record loss information and return whether to stop
-    def record_loss(new_loss, new_network):
+    def record_loss(new_loss, new_network, epoch_num):
         # Load record variables from outer scope
         nonlocal loss_rec, first_loss, best_loss, best_network
 
@@ -452,16 +472,25 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
         if first_loss is None:
             first_loss = new_loss
 
-        # Update loss record and check for early stopping
-        window = 2      # Number of epochs record for early stopping
+        # Update loss record and check for early stopping. If you want to
+        # change early stopping criteria, this is the place to do it.
+        window = 2    # Number of epochs kept for checking early stopping
+        warmup = 1    # Number of epochs before early stopping is checked
         if len(loss_rec) < window:
             stop, loss_rec = False, loss_rec + [new_loss]
         else:
             # stop = new_loss > sum(loss_rec)/len(loss_rec)
-            stop = new_loss > max(loss_rec)
+            stop = (new_loss > max(loss_rec)) and (epoch_num >= warmup)
             loss_rec = loss_rec[1:] + [new_loss]
 
         return stop
+
+    # Another loss logging function, but for recording *all* loss history
+    @torch.no_grad()
+    def loss_history(new_loss, is_val):
+        if not hist: return
+        nonlocal loss_record
+        loss_record[int(is_val)].append(new_loss)
 
     # Function to run TN on validation data
     @torch.no_grad()
@@ -482,7 +511,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     tensor_list = copy_network(tensor_list)
 
     # Record the initial validation loss (if we validation dataset)
-    if has_val: record_loss(run_val(tensor_list), tensor_list)
+    if has_val: record_loss(run_val(tensor_list), tensor_list, 0)
 
     # Initialize optimizer
     optim = getattr(torch.optim, optim)(tensor_list, lr=lr)
@@ -504,21 +533,28 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 num_train += 1
                 train_loss += loss
         train_loss /= num_train
+        loss_history(train_loss, is_val=False)
         m_print(f"    Train loss: {train_loss.data:.3f}")
 
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
             # Get and record validation loss, check early stopping condition
             val_loss = run_val(tensor_list)
-            if record_loss(val_loss, tensor_list) and early_stop:
+            loss_history(val_loss, is_val=True)
+            if record_loss(val_loss, tensor_list, ep) and early_stop:
                 m_print(f"Early stopping condition reached")
                 break
         else:
-            record_loss(train_loss, tensor_list)
+            record_loss(train_loss, tensor_list, ep)
         ep += 1
     m_print("")
 
-    return best_network, first_loss, best_loss
+    if hist:
+        loss_record = tuple(torch.tensor(fr) for fr in loss_record)
+        return best_network, first_loss, best_loss, loss_record
+    else:
+        return best_network, first_loss, best_loss
+
 
 def tensor_recovery_loss(tensor_list, target_tensor):
     """
