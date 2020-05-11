@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python 
 import random
 from functools import partial, reduce
 
@@ -422,6 +422,8 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                         print: Whether to print info       (default=True)
                         hist:  Whether to return losses
                                from train and val sets     (default=False)
+                        momentum: Momentum value for 
+                                  continuous optimization  (default=0)
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
@@ -452,6 +454,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     reps  = other_args['reps']  if 'reps'  in other_args else 1
     prnt  = other_args['print'] if 'print' in other_args else True
     hist  = other_args['hist']  if 'hist'  in other_args else False
+    momentum = other_args['momentum'] if 'momentum' in other_args else 0
     if early_stop and not has_val:
         raise ValueError("Early stopping (epochs=None) requires val_data "
                          "to be input")
@@ -514,7 +517,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     if has_val: record_loss(run_val(tensor_list), tensor_list, 0)
 
     # Initialize optimizer
-    optim = getattr(torch.optim, optim)(tensor_list, lr=lr)
+    optim = getattr(torch.optim, optim)(tensor_list, lr=lr, momentum=momentum)
 
     # Loop over validation and training for given number of epochs
     ep = 1
