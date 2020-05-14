@@ -1,5 +1,6 @@
 #!/usr/bin/env python 
 import random
+from inspect import signature
 from functools import partial, reduce
 
 import torch
@@ -16,12 +17,23 @@ cores, the shape will be:
 tensor_i.shape = (r_1, r_2, ..., r_i, ..., r_n),
 
 where r_j gives the tensor network rank (TN-rank) connecting cores i and j
-when j != i, while r_i gives the dimension of the input to core i. This 
-implies that tensor_i.shape[j] == tensor_j.shape[i], and stacking the 
+when j != i, while r_i := d_i gives the dimension of the input to core i. 
+This implies that tensor_i.shape[j] == tensor_j.shape[i], and stacking the 
 shapes of all the tensors in order gives the adjacency matrix of the 
-network (ignoring the diagonals).
+network as follows:
 
-On occasion, the ranks are specified in the following triangular format:
+     [[d_1, r_{1,2}, ..., r_{1,n}],
+      [r_{1,2}, d_2, ..., r_{2,n}],
+                     ...
+      [r_{1,n}, r_{2,n}, ..., d_n]]
+
+The diagonal entries here are precisely the input dimensions for each of 
+the core tensors, while the symmetric nature of the matrix is necessary 
+for different cores to contract with each other.
+
+Besides the above matrix format, the ranks are also sometimes specified 
+in the following upper-triangular format:
+
      [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}], ...
       ..., [r_{n-2,n-1}, r_{n-2,n}], [r_{n-1,n}]]
 """
@@ -29,6 +41,171 @@ On occasion, the ranks are specified in the following triangular format:
 # Set global defaults
 tn.set_default_backend("pytorch")
 torch.set_default_tensor_type(torch.DoubleTensor)
+
+def continuous_optim(tensor_list, train_data, loss_fun, epochs=10, 
+                     val_data=None, other_args=dict()):
+    """
+    Train a tensor network using gradient descent on input dataset
+
+    Args:
+        tensor_list: List of tensors encoding the network being trained
+        train_data:  The data used to train the network
+        loss_fun:    Scalar-valued loss function of the type 
+                        tens_list, data -> scalar_loss
+                     (This depends on the task being learned)
+        epochs:      Number of epochs to train for. When val_data is given,
+                     setting epochs=None implements early stopping
+        val_data:    The data used for validation
+        other_args:  Dictionary of other arguments for the optimization, 
+                     with some options below (feel free to add more)
+
+                        optim: Choice of Pytorch optimizer (default='SGD')
+                        lr:    Learning rate for optimizer (default=1e-3)
+                        bsize: Minibatch size for training (default=100)
+                        reps:  Number of times to repeat 
+                               training data per epoch     (default=1)
+                        print: Whether to print info       (default=True)
+                        hist:  Whether to return losses
+                               from train and val sets     (default=False)
+                        momentum: Momentum value for 
+                                  continuous optimization  (default=0)
+    
+    Returns:
+        better_list: List of tensors with same shape as tensor_list, but
+                     having been optimized using the appropriate optimizer.
+                     When validation data is given, the model with the 
+                     lowest validation loss is output, otherwise the model
+                     with lowest training loss
+        first_loss:  Initial loss of the model on the validation set, 
+                     before any training. If no val set is provided, the
+                     first training loss is instead returned
+        best_loss:   The value of the validation/training loss for the
+                     model output as better_list
+        loss_record: If hist=True in other_args, history of all validation
+                     and training losses is returned as a tuple of Pytorch
+                     vectors (train_loss, val_loss), with each vector
+                     having length equal to number of epochs of training.
+                     When no validation loss is provided, the second item
+                     (val_loss) is an empty tensor.
+
+
+    """
+    # Check input and initialize local record variables
+    early_stop = epochs is None
+    has_val = val_data is not None
+    optim = other_args['optim'] if 'optim' in other_args else 'SGD'
+    lr    = other_args['lr']    if 'lr'    in other_args else 1e-3
+    bsize = other_args['bsize'] if 'bsize' in other_args else 100
+    reps  = other_args['reps']  if 'reps'  in other_args else 1
+    prnt  = other_args['print'] if 'print' in other_args else True
+    hist  = other_args['hist']  if 'hist'  in other_args else False
+    momentum = other_args['momentum'] if 'momentum' in other_args else 0
+    if early_stop and not has_val:
+        raise ValueError("Early stopping (epochs=None) requires val_data "
+                         "to be input")
+    loss_rec, first_loss, best_loss, best_network = [], None, None, None
+    if hist: loss_record = ([], [])    # (train_record, val_record)
+
+    # Function to maybe print, conditioned on `prnt`
+    m_print = lambda s: print(s) if prnt else None
+
+    # Function to record loss information and return whether to stop
+    def record_loss(new_loss, new_network, epoch_num):
+        # Load record variables from outer scope
+        nonlocal loss_rec, first_loss, best_loss, best_network
+
+        # Check for first and best loss
+        if best_loss is None or new_loss < best_loss:
+            best_loss, best_network = new_loss, new_network
+        if first_loss is None:
+            first_loss = new_loss
+
+        # Update loss record and check for early stopping. If you want to
+        # change early stopping criteria, this is the place to do it.
+        window = 2    # Number of epochs kept for checking early stopping
+        warmup = 1    # Number of epochs before early stopping is checked
+        if len(loss_rec) < window:
+            stop, loss_rec = False, loss_rec + [new_loss]
+        else:
+            # stop = new_loss > sum(loss_rec)/len(loss_rec)
+            stop = (new_loss > max(loss_rec)) and (epoch_num >= warmup)
+            loss_rec = loss_rec[1:] + [new_loss]
+
+        return stop
+
+    # Another loss logging function, but for recording *all* loss history
+    @torch.no_grad()
+    def loss_history(new_loss, is_val):
+        if not hist: return
+        nonlocal loss_record
+        loss_record[int(is_val)].append(new_loss)
+
+    # Function to run TN on validation data
+    @torch.no_grad()
+    def run_val(t_list):
+        val_loss = []
+
+        # Note that `batchify` uses different logic for different types
+        # of input, so update batchify when you work on tensor completion
+        for batch in batchify(val_data):
+            val_loss.append(loss_fun(t_list, batch))
+        if has_val:
+            val_loss = torch.mean(torch.tensor(val_loss))
+            m_print(f"    Val. loss:  {val_loss.data:.3f}")
+
+        return val_loss
+
+    # Copy tensor_list so the original is unchanged
+    tensor_list = copy_network(tensor_list)
+
+    # Record the initial validation loss (if we validation dataset)
+    if has_val: record_loss(run_val(tensor_list), tensor_list, 0)
+
+    # Initialize optimizer, using only the keyword args in the 
+    optim = getattr(torch.optim, optim)
+    opt_args = signature(optim).parameters.keys()
+    kwargs = {'lr':lr, 'momentum':momentum}    # <- Add new options here
+    kwargs = {k: v for (k, v) in kwargs.items() if k in opt_args}
+    optim = optim(tensor_list, **kwargs)    # Initialize the optimizer
+
+    # Loop over validation and training for given number of epochs
+    ep = 1
+    while epochs is None or ep <= epochs:
+        m_print(f"  EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}")
+
+        # Train network on all the training data
+        train_loss, num_train = 0., 0
+        for batch in batchify(train_data, batch_size=bsize, reps=reps):
+            loss = loss_fun(tensor_list, batch)
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+
+            with torch.no_grad():
+                num_train += 1
+                train_loss += loss
+        train_loss /= num_train
+        loss_history(train_loss, is_val=False)
+        m_print(f"    Train loss: {train_loss.data:.3f}")
+
+        # Get validation loss if we have it, otherwise record training loss
+        if has_val:
+            # Get and record validation loss, check early stopping condition
+            val_loss = run_val(tensor_list)
+            loss_history(val_loss, is_val=True)
+            if record_loss(val_loss, tensor_list, ep) and early_stop:
+                m_print(f"Early stopping condition reached")
+                break
+        else:
+            record_loss(train_loss, tensor_list, ep)
+        ep += 1
+    m_print("")
+
+    if hist:
+        loss_record = tuple(torch.tensor(fr) for fr in loss_record)
+        return best_network, first_loss, best_loss, loss_record
+    else:
+        return best_network, first_loss, best_loss
 
 def contract_network(nodes, contractor='auto', edge_order=None):
     """
@@ -171,7 +348,7 @@ def expand_network(tensor_list):
     """
     return wire_network(tensor_list, give_dense=True)
 
-def random_tn(input_dims, rank=1):
+def random_tn(input_dims=None, rank=1):
     """
     Initialize a tensor network with random (normally distributed) cores
 
@@ -189,19 +366,39 @@ def random_tn(input_dims, rank=1):
         tensor_list: List of randomly initialized and properly formatted
                      tensors encoding our tensor network
     """
-    num_cores = len(input_dims)
+    # Convert rank object to list of shapes
+    if hasattr(rank, 'shape'):
+        # Matrix format
+        shape_mat = rank.shape
+        assert len(shape_mat) == 2
+        assert shape_mat[0] == shape_mat[1]
+        shape_list = [tuple(int(r) for r in row) for row in shape_mat]
+    elif hasattr(rank, '__len__'):
+        if len(set(len(row) for row in rank)) == 1:
+            # Matrix-type format
+            shape_list = [tuple(int(r) for r in row) for row in rank]
+        else:
+            # Upper-triangular format 
+            shape_list = unpack_ranks(input_dims, rank) 
+    else:
+        # Scalar format
+        assert hasattr(input_dims, '__len__')
+        r, n_c = rank, len(input_dims)
+        shape_list = [(r,)*i + (d,) + (r,)*(n_c-1-i) 
+                      for i, d in enumerate(input_dims)]
+    num_cores = len(shape_list)
+
+    # Check that diagonals match input_dims
+    if input_dims is not None:
+        assert len(input_dims) == num_cores
+        assert all(shape_list[i][i] == d for i, d in enumerate(input_dims))
+
+    # Heuristic function used to set stdev of normally-distributed tensor
+    # elements, feel free to replace as desired
     def stdev_fun(shape):
-        """Heuristic function which converts shapes into standard devs"""
         # Square root of num_core'th root of number of elements in shape
         num_el = torch.prod(torch.tensor(shape)).to(dtype=torch.float)
         return torch.exp(torch.log(num_el) / (2 * num_cores))
-
-    # Process input and convert input into core shapes
-    if not hasattr(rank, '__len__'):
-        rank = [[rank] * e for e in range(num_cores - 1, 0, -1)]
-    assert len(rank) == num_cores - 1
-
-    shape_list = unpack_ranks(input_dims, rank)
 
     # Use shapes to instantiate random core tensors
     tensor_list = []
@@ -396,168 +593,6 @@ def num_params(tensor_list):
         param_count: The number of parameters in the tensor network
     """
     return sum(t.numel() for t in tensor_list)
-
-def continuous_optim(tensor_list, train_data, loss_fun, epochs=10, 
-                     val_data=None, other_args=dict()):
-    """
-    Train a tensor network using gradient descent on input dataset
-
-    Args:
-        tensor_list: List of tensors encoding the network being trained
-        train_data:  The data used to train the network
-        loss_fun:    Scalar-valued loss function of the type 
-                        tens_list, data -> scalar_loss
-                     (This depends on the task being learned)
-        epochs:      Number of epochs to train for. When val_data is given,
-                     setting epochs=None implements early stopping
-        val_data:    The data used for validation
-        other_args:  Dictionary of other arguments for the optimization, 
-                     with some options below (feel free to add more)
-
-                        optim: Choice of Pytorch optimizer (default='SGD')
-                        lr:    Learning rate for optimizer (default=1e-3)
-                        bsize: Minibatch size for training (default=100)
-                        reps:  Number of times to repeat 
-                               training data per epoch     (default=1)
-                        print: Whether to print info       (default=True)
-                        hist:  Whether to return losses
-                               from train and val sets     (default=False)
-                        momentum: Momentum value for 
-                                  continuous optimization  (default=0)
-    
-    Returns:
-        better_list: List of tensors with same shape as tensor_list, but
-                     having been optimized using the appropriate optimizer.
-                     When validation data is given, the model with the 
-                     lowest validation loss is output, otherwise the model
-                     with lowest training loss
-        first_loss:  Initial loss of the model on the validation set, 
-                     before any training. If no val set is provided, the
-                     first training loss is instead returned
-        best_loss:   The value of the validation/training loss for the
-                     model output as better_list
-        loss_record: If hist=True in other_args, history of all validation
-                     and training losses is returned as a tuple of Pytorch
-                     vectors (train_loss, val_loss), with each vector
-                     having length equal to number of epochs of training.
-                     When no validation loss is provided, the second item
-                     (val_loss) is an empty tensor.
-
-
-    """
-    # Check input and initialize local record variables
-    early_stop = epochs is None
-    has_val = val_data is not None
-    optim = other_args['optim'] if 'optim' in other_args else 'SGD'
-    lr    = other_args['lr']    if 'lr'    in other_args else 1e-3
-    bsize = other_args['bsize'] if 'bsize' in other_args else 100
-    reps  = other_args['reps']  if 'reps'  in other_args else 1
-    prnt  = other_args['print'] if 'print' in other_args else True
-    hist  = other_args['hist']  if 'hist'  in other_args else False
-    momentum = other_args['momentum'] if 'momentum' in other_args else 0
-    if early_stop and not has_val:
-        raise ValueError("Early stopping (epochs=None) requires val_data "
-                         "to be input")
-    loss_rec, first_loss, best_loss, best_network = [], None, None, None
-    if hist: loss_record = ([], [])    # (train_record, val_record)
-
-    # Function to maybe print, conditioned on `prnt`
-    m_print = lambda s: print(s) if prnt else None
-
-    # Function to record loss information and return whether to stop
-    def record_loss(new_loss, new_network, epoch_num):
-        # Load record variables from outer scope
-        nonlocal loss_rec, first_loss, best_loss, best_network
-
-        # Check for first and best loss
-        if best_loss is None or new_loss < best_loss:
-            best_loss, best_network = new_loss, new_network
-        if first_loss is None:
-            first_loss = new_loss
-
-        # Update loss record and check for early stopping. If you want to
-        # change early stopping criteria, this is the place to do it.
-        window = 2    # Number of epochs kept for checking early stopping
-        warmup = 1    # Number of epochs before early stopping is checked
-        if len(loss_rec) < window:
-            stop, loss_rec = False, loss_rec + [new_loss]
-        else:
-            # stop = new_loss > sum(loss_rec)/len(loss_rec)
-            stop = (new_loss > max(loss_rec)) and (epoch_num >= warmup)
-            loss_rec = loss_rec[1:] + [new_loss]
-
-        return stop
-
-    # Another loss logging function, but for recording *all* loss history
-    @torch.no_grad()
-    def loss_history(new_loss, is_val):
-        if not hist: return
-        nonlocal loss_record
-        loss_record[int(is_val)].append(new_loss)
-
-    # Function to run TN on validation data
-    @torch.no_grad()
-    def run_val(t_list):
-        val_loss = []
-
-        # Note that `batchify` uses different logic for different types
-        # of input, so update batchify when you work on tensor completion
-        for batch in batchify(val_data):
-            val_loss.append(loss_fun(t_list, batch))
-        if has_val:
-            val_loss = torch.mean(torch.tensor(val_loss))
-            m_print(f"    Val. loss:  {val_loss.data:.3f}")
-
-        return val_loss
-
-    # Copy tensor_list so the original is unchanged
-    tensor_list = copy_network(tensor_list)
-
-    # Record the initial validation loss (if we validation dataset)
-    if has_val: record_loss(run_val(tensor_list), tensor_list, 0)
-
-    # Initialize optimizer
-    optim = getattr(torch.optim, optim)(tensor_list, lr=lr, momentum=momentum)
-
-    # Loop over validation and training for given number of epochs
-    ep = 1
-    while epochs is None or ep <= epochs:
-        m_print(f"  EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}")
-
-        # Train network on all the training data
-        train_loss, num_train = 0., 0
-        for batch in batchify(train_data, batch_size=bsize, reps=reps):
-            loss = loss_fun(tensor_list, batch)
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-
-            with torch.no_grad():
-                num_train += 1
-                train_loss += loss
-        train_loss /= num_train
-        loss_history(train_loss, is_val=False)
-        m_print(f"    Train loss: {train_loss.data:.3f}")
-
-        # Get validation loss if we have it, otherwise record training loss
-        if has_val:
-            # Get and record validation loss, check early stopping condition
-            val_loss = run_val(tensor_list)
-            loss_history(val_loss, is_val=True)
-            if record_loss(val_loss, tensor_list, ep) and early_stop:
-                m_print(f"Early stopping condition reached")
-                break
-        else:
-            record_loss(train_loss, tensor_list, ep)
-        ep += 1
-    m_print("")
-
-    if hist:
-        loss_record = tuple(torch.tensor(fr) for fr in loss_record)
-        return best_network, first_loss, best_loss, loss_record
-    else:
-        return best_network, first_loss, best_loss
-
 
 def tensor_recovery_loss(tensor_list, target_tensor):
     """
@@ -884,9 +919,3 @@ def solve_Continuous(targetData, tensorList, indxList, iterNum, lossFun,
         optimizer.step()                # the new A,B,C will be A_k+1,B_k+1, C_k+1 after optimizer.step 
         LostList.append(float(loss_fn))
     return tensorList, indxList, LostList
-
-def avgPoints(list1, num_points):
-    #num_points = number of elements from list1 that you want to take the average of
-    n = len(list1)
-    avg = sum(list1[n-num_points:n])/num_points
-    return avgPoints
