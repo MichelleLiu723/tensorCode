@@ -87,8 +87,6 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                      having length equal to number of epochs of training.
                      When no validation loss is provided, the second item
                      (val_loss) is an empty tensor.
-
-
     """
     # Check input and initialize local record variables
     early_stop = epochs is None
@@ -242,14 +240,14 @@ def evaluate_input(tensor_rep, input_list):
         input_list:  Batch of inputs to feed to the cores in our tensor.
                      This can be either a list of matrices with shapes 
                      (batch_dim, input_dim_i) or a single PyTorch tensor 
-                     with shape (num_modes, batch_dim, input_dim)
+                     with shape (num_cores, batch_dim, input_dim)
 
     Returns:
         closed_list: Scalar or batch tensor giving output of contraction
                      between tensor network and input data
     """
-    num_modes = len(tensor_rep)
-    assert len(input_list) == num_modes
+    num_cores = len(tensor_rep)
+    assert len(input_list) == num_cores
     assert isinstance(tensor_rep, (tuple, list, torch.Tensor))
     assert len(set(len(inp.shape) for inp in input_list)) == 1
 
@@ -262,14 +260,14 @@ def evaluate_input(tensor_rep, input_list):
         assert all(i.shape[0] == batch_dim for i in input_list)
 
         # Generate batch node for dealing with batch dims
-        batch_edges = batch_node(num_modes, batch_dim)
-        assert len(batch_edges) == num_modes + 1
+        batch_edges = batch_node(num_cores, batch_dim)
+        assert len(batch_edges) == num_cores + 1
 
     # Convert all tensor cores to list of wired nodes
     node_list = wire_network(tensor_rep)
 
     # Go through and contract all inputs with corresponding cores
-    for i, node, inp in zip(range(num_modes), node_list, input_list):
+    for i, node, inp in zip(range(num_cores), node_list, input_list):
         inp_node = tn.Node(inp)
         node[i] ^ inp_node[int(has_batch)]
 
@@ -418,12 +416,12 @@ def copy_network(tensor_list):
                for t, ct in zip(tensor_list, my_copy)]
     return my_copy
 
-def generate_regression_data(tensor_list, batch_dim, noise=1e-5):
+def generate_regression_data(target_tensor, batch_dim, noise=1e-5):
     """
     Use a target tensor network to get pair of batch (input, output) data
 
     Args:
-        tensor_list: List of tensors encoding a target tensor network,
+        target_tensor: List of tensors encoding a target tensor network,
                      which is used to generate the data
         batch_dim:   The number of inputs and outputs to generate
         noise:       Stdev of Guassian noise to add to real output value
@@ -431,11 +429,11 @@ def generate_regression_data(tensor_list, batch_dim, noise=1e-5):
     Return:
         rand_ins:    List of matrices, with i'th entry having shape
                      (batch_dim, input_dim_i), with input_dim_i being the 
-                     i'th visible dimension of tensor_list
+                     i'th visible dimension of target_tensor
         rand_out:    Vector of length batch_dim holding noisy outputs
     """
-    num_cores = len(tensor_list)
-    indims = torch.tensor(get_indims(tensor_list))
+    num_cores = len(target_tensor)
+    indims = torch.tensor(get_indims(target_tensor))
     rand_ins = [torch.randn((batch_dim, d)) / torch.sqrt(d.float()) 
                     for d in indims]
         
@@ -444,11 +442,11 @@ def generate_regression_data(tensor_list, batch_dim, noise=1e-5):
         rand_ins = torch.tensor(rand_ins)
 
     # Produce outputs in small batches
-    eval_fun = partial(evaluate_input, tensor_list)
+    eval_fun = partial(evaluate_input, target_tensor)
     num, mini_size, rand_out = 0, 50, []
     while num < batch_dim:
         this_in = [r_in[num:num+mini_size] for r_in in rand_ins]
-        rand_out.append(evaluate_input(tensor_list, this_in))
+        rand_out.append(evaluate_input(target_tensor, this_in))
         num += mini_size
     rand_out = torch.cat(rand_out)
 
@@ -599,32 +597,62 @@ def tensor_recovery_loss(tensor_list, target_tensor):
     Compute the L2 distance between our tensor network and a target network
 
     Args:
-        tensor_list:
+        tensor_list:   List of tensors encoding a tensor network
+        target_tensor: The tensor network we are trying to approximate
+
+    Returns:
+        loss:          The L2 distance
 
     """
     return l2_distance(tensor_list, target_tensor)
 
-def regression_loss(tensor_list, dataset):
+def regression_loss(tensor_list, dataset, p=2):
     """
-    Compute the L2 distance between target values and output of tensor 
-    network when given input values
+    Compute the regression loss of TN when used as scalar-valued fun, 
+    relative to dataset of inputs and outputs
 
     Args:
         tensor_list: List of tensors encoding a tensor network
-        dataset:     Tuple of the form (input_list, targets), where
-                     input_list is formatted as the corresponding argument
-                     of `evaluate_input` (see there), and targets is a 
-                     PyTorch vector containing target values
+        dataset:     Tuple of the form (input_list, targets), with targets 
+                     a PyTorch vector containing target values, and 
+                     input_list either a list of matrices with shapes 
+                     (batch_dim, input_dim_i), or else a single PyTorch 
+                     tensor with shape (num_cores, batch_dim, input_dim)
+        p:           Sets which p-norm is used for the loss (default: 2)
 
     Returns:
-        loss:        The L2 distance between targets and the contraction
-                     of our network with the data in input_list
+        loss:        The sum of distance between targets and the output of
+                     tensor_list when fed the contents of input_list
     """
     # Unpack dataset and evaluate inputs using tensor network
     input_list, targets = dataset
     outputs = evaluate_input(tensor_list, input_list)
 
-    return torch.dist(targets, outputs)
+    return torch.dist(targets, outputs, p=p)
+
+def completion_loss(tensor_list, dataset, p=2):
+    """
+    Compute sum of distances between actual and target tensor elements, 
+    for all elements with known values in the dataset
+
+    Args:
+        tensor_list: List of tensors encoding a tensor network
+        dataset:     Tuple of the form (input_elms, targets), with targets 
+                     a PyTorch vector of target values, and input_elms an 
+                     integer PyTorch matrix of shape (num_cores, batch_dim)
+        p:           Sets which p-norm is used for the loss (default: 2)
+
+    Returns:
+        loss:        The sum of distance between targets and the output of
+                     tensor_list when fed the contents of input_list
+    """
+    # Convert input_elms to one-hot vectors, then call regression loss
+    input_elms, targets = dataset
+    in_dims = get_indims(tensor_list)
+    one_hot = torch.functional.F.one_hot
+    input_list = [one_hot(vec, d) for vec, d in zip(input_elms, in_dims)]
+
+    return regression_loss(tensor_list, (input_list, targets), p=p)
 
 @torch.no_grad()
 def batchify(dataset, batch_size=100, reps=1):
