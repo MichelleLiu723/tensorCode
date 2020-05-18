@@ -106,7 +106,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     if hist: loss_record = ([], [])    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `prnt`
-    m_print = lambda s: print(s) if prnt else None
+    m_print = lambda s: print(s, end='\r') if prnt else None
 
     # Function to record loss information and return whether to stop
     def record_loss(new_loss, new_network, epoch_num):
@@ -170,7 +170,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     # Loop over validation and training for given number of epochs
     ep = 1
     while epochs is None or ep <= epochs:
-        m_print(f"  EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}")
+
 
         # Train network on all the training data
         train_loss, num_train = 0., 0
@@ -185,7 +185,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 train_loss += loss
         train_loss /= num_train
         loss_history(train_loss, is_val=False)
-        m_print(f"    Train loss: {train_loss.data:.3f}")
+        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.3f}")
 
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
@@ -193,11 +193,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             val_loss = run_val(tensor_list)
             loss_history(val_loss, is_val=True)
             if record_loss(val_loss, tensor_list, ep) and early_stop:
-                m_print(f"Early stopping condition reached")
+                print(f"\nEarly stopping condition reached")
                 break
         else:
             if record_loss(train_loss, tensor_list, ep) and early_stop:
-                m_print(f"Early stopping condition reached")
+                print(f"\nEarly stopping condition reached")
                 break
 
 
