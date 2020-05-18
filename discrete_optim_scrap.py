@@ -86,8 +86,9 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
     # Check input and initialize local record variables
     epochs  = other_args['epochs'] if 'epochs' in other_args else 10
     dprint  = other_args['dprint'] if 'dprint' in other_args else True
+    cprint  = other_args['cprint'] if 'cprint' in other_args else True
     dhist  = other_args['dhist']  if 'dhist'  in other_args else False
-    loss_rec, first_loss, best_loss, best_network = [], None, None, None
+    loss_rec, prev_loss, best_loss, best_network = [], None, None, None
     if dhist: loss_record = []    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `dprint`
@@ -123,18 +124,18 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
     stage = 0
     better_network, better_loss = tensor_list, 1e10
     while not stop_cond(better_network):
-        if first_loss is None:
+        if prev_loss is None:
             # Record initial loss of TN model 
             first_args = other_args
-            first_args["print"] = first_args["hist"] = False
-            _, first_loss, _ = cc.continuous_optim(tensor_list, train_data, 
-                                    loss_fun, epochs=1, val_data=val_data,
+            first_args["print"] = True
+            first_args["hist"] = False
+            tensor_list, _, prev_loss = cc.continuous_optim(tensor_list, train_data, 
+                                    loss_fun, epochs=epochs, val_data=val_data,
                                     other_args=first_args)
             m_print("Initial model has TN ranks")
             if dprint: cc.print_ranks(tensor_list)
-            m_print(f"Initial loss is {first_loss:.3f}")
-            continue
-        m_print(f"STAGE {stage}")
+            m_print(f"Initial loss is {prev_loss:.7f}")
+            
 
 ##################################line 139 onward are new added acode#############
         # Try out training different network ranks and assign network
@@ -162,39 +163,42 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
         initialNetwork  = cc.copy_network(tensor_list) #example_tn
         loss_record = []
         for k in range(5):   
+            m_print(f"STAGE {k}")   
             if paramKey == 1:
                 break
             for i in range(len(currentNetwork)):
                 if paramKey == 1:
                     break
-                for j in range(i, len(currentNetwork)):
+                for j in range(i+1, len(currentNetwork)):
+                    currentNetwork = cc.copy_network(initialNetwork)
+                    #increase rank along a chosen dimension
+                    currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-2)
                     if paramKey ==1:
                         break
-                    if i==j:
-                        continue
                     print('k = ', k, 'i =', i, 'j = ', j)
+                    #print(cc.print_ranks(currentNetwork))
                     stop_cond = generate_stop_cond(cc.get_indims(currentNetwork)) #***********need to add param=-1
                     if stop_cond == True:  #i.e. break if the number of parameters in trained tensor exceeds number of param. in target tensor
                         break
                     #solve continuos optimization part, train_data = target_tensor
-                    [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, loss_fun, epochs=20, val_data=None, other_args=dict())
+                    [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
+                        loss_fun, val_data=val_data, epochs=epochs, other_args={'print':cprint})
+                    
+                    m_print(f"Current loss is {current_loss:.7f}")
                     if prev_loss > current_loss:
                         prev_loss = current_loss
                         better_network = currentNetwork
                         numParam = cc.num_params(better_network)
                         better_loss = current_loss
-                    else:
-                        print('prev_loss < current_loss so no rank update at this iteration k =', k, 'i = ', i, 'j = ', j)
-                        print('prev_loss = ', prev_loss)
+                        print('best rank update so far:', i,j)
                     #reset currentNetwork to contuniue with greedy at another point
-                    currentNetwork = cc.copy_network(initialNetwork)
-                    #increase rank along a chosen dimension
-                    currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-6)
             #upate parameters
             currentNetwork = cc.copy_network(better_network)
             #update current point to the new point (i.e. better_network) that gave lower loss
             initialNetwork  = cc.copy_network(better_network)
             loss_record.append(better_loss)
+            print('best TN:')
+            cc.print_ranks(better_network)
         return best_network, first_loss, better_loss #, loss_record
 
 #for testing
@@ -225,7 +229,9 @@ if __name__ == '__main__':
     goal_tn = cc.random_tn(input_dims, rank=rank_list)
     base_tn = cc.make_trainable(base_tn)
     trained_tn, init_loss, better_loss = discrete_optim_template(base_tn, 
-                                                        goal_tn, loss_fun)
+                                                        goal_tn, loss_fun, 
+                                                        val_data=None, 
+                                                        other_args={'cprint':True, 'epochs':None,'lr':0.01, 'optim':'Adam'})
     print('better loss = ', better_loss)
 
 
