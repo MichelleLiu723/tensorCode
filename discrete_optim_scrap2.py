@@ -86,9 +86,8 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
     # Check input and initialize local record variables
     epochs  = other_args['epochs'] if 'epochs' in other_args else 10
     dprint  = other_args['dprint'] if 'dprint' in other_args else True
-    cprint  = other_args['cprint'] if 'cprint' in other_args else True
     dhist  = other_args['dhist']  if 'dhist'  in other_args else False
-    loss_rec, prev_loss, best_loss, best_network = [], None, None, None
+    loss_rec, first_loss, best_loss, best_network = [], None, None, None
     if dhist: loss_record = []    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `dprint`
@@ -123,19 +122,25 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
     # test out different ranks before choosing just one to increase
     stage = 0
     better_network, better_loss = tensor_list, 1e10
+    initialNetwork  = cc.copy_network(tensor_list) #example_tn
     while not stop_cond(better_network):
-        if prev_loss is None:
+        if first_loss is None:
             # Record initial loss of TN model 
-            first_args = other_args
-            first_args["print"] = True
-            first_args["hist"] = False
-            tensor_list, _, prev_loss = cc.continuous_optim(tensor_list, train_data, 
-                                    loss_fun, epochs=epochs, val_data=val_data,
+            first_args = other_args.copy()
+            first_args["print"] = first_args["hist"] = False
+            _, first_loss, _ = cc.continuous_optim(tensor_list, train_data, 
+                                    loss_fun, epochs=1, val_data=val_data,
                                     other_args=first_args)
             m_print("Initial model has TN ranks")
-            if dprint: cc.print_ranks(tensor_list)
-            m_print(f"Initial loss is {prev_loss:.7f}")
-            
+            m_print(f"Initial loss is {first_loss:.3f}")
+            m_print("Performing initial optimization...")
+            first_args["print"] = True
+            initialNetwork, _, _ = cc.continuous_optim(tensor_list, train_data, 
+                                    loss_fun, epochs=2000, val_data=val_data,
+                                    other_args=first_args)
+            continue
+        m_print(f"STAGE {stage}")
+        stage += 1
 
 ##################################line 139 onward are new added acode#############
         # Try out training different network ranks and assign network
@@ -155,51 +160,43 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
         #                                         val_data=val_data,
         #                                         other_args=other_args)
 
-        paramKey = -1
         #best_loss = float('inf')
         prev_loss = float('inf')
+        num_cores = len(tensor_list)
         max_params = torch.prod(torch.tensor((cc.get_indims(train_data))))  #train data is the target tensor
-        currentNetwork  = cc.copy_network(tensor_list) #temp
-        initialNetwork  = cc.copy_network(tensor_list) #example_tn
         loss_record = []
-        for k in range(5):   
-            m_print(f"STAGE {k}")   
-            if paramKey == 1:
-                break
-            for i in range(len(currentNetwork)):
-                if paramKey == 1:
+        for i in range(num_cores):
+            for j in range(i+1, num_cores):
+                m_print(f"Testing i={i}, j={j}")
+
+                #reset currentNetwork to contuniue with greedy at another point
+                currentNetwork = cc.copy_network(initialNetwork)
+                #increase rank along a chosen dimension
+                currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-6)
+
+                stop_cond = generate_stop_cond(cc.get_indims(currentNetwork)) #***********need to add param=-1
+                if stop_cond(currentNetwork) == True:  #i.e. break if the number of parameters in trained tensor exceeds number of param. in target tensor
                     break
-                for j in range(i+1, len(currentNetwork)):
-                    currentNetwork = cc.copy_network(initialNetwork)
-                    #increase rank along a chosen dimension
-                    currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-2)
-                    if paramKey ==1:
-                        break
-                    print('k = ', k, 'i =', i, 'j = ', j)
-                    #print(cc.print_ranks(currentNetwork))
-                    stop_cond = generate_stop_cond(cc.get_indims(currentNetwork)) #***********need to add param=-1
-                    if stop_cond == True:  #i.e. break if the number of parameters in trained tensor exceeds number of param. in target tensor
-                        break
-                    #solve continuos optimization part, train_data = target_tensor
-                    [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
-                        loss_fun, val_data=val_data, epochs=epochs, other_args={'print':cprint})
-                    
-                    m_print(f"Current loss is {current_loss:.7f}")
-                    if prev_loss > current_loss:
-                        prev_loss = current_loss
-                        better_network = currentNetwork
-                        numParam = cc.num_params(better_network)
-                        better_loss = current_loss
-                        print('best rank update so far:', i,j)
-                    #reset currentNetwork to contuniue with greedy at another point
-            #upate parameters
-            currentNetwork = cc.copy_network(better_network)
-            #update current point to the new point (i.e. better_network) that gave lower loss
-            initialNetwork  = cc.copy_network(better_network)
-            loss_record.append(better_loss)
-            print('best TN:')
-            cc.print_ranks(better_network)
-        return best_network, first_loss, better_loss #, loss_record
+
+                #solve continuos optimization part, train_data = target_tensor
+                [currentNetwork, first_loss, current_loss] = cc.continuous_optim(
+                                currentNetwork, train_data, loss_fun, 
+                                epochs=epochs, val_data=val_data, other_args=other_args)
+                if prev_loss > current_loss:
+                    prev_loss = current_loss
+                    better_network = currentNetwork
+                    numParam = cc.num_params(better_network)
+                    better_loss = current_loss
+                    m_print("BEST CONFIG")
+                else:
+                    m_print("Not best config")
+                m_print(f"{first_loss:.3f} -> {current_loss:.3f}\n")
+
+        #update current point to the new point (i.e. better_network) that gave lower loss
+        initialNetwork  = cc.copy_network(better_network)
+        loss_record.append(better_loss)
+
+    return best_network, first_loss, better_loss #, loss_record
 
 #for testing
 
@@ -221,18 +218,20 @@ if __name__ == '__main__':
     input_dims = [d0, d1, d2, d3, d4, d5]
     rank_list = [[r12, 1, 1, 1, 1], 
                      [r23,1, 1, 1], 
-                         [r34, 1, 1],
-                              [r45, 1],
-                                   [r56]]
-    
+                       [r34, 1, 1],
+                          [r45, 1],
+                             [r56]]
+
+    # Parameters to control the experimental behavior
+    exp_params = {'print': False,
+                  'epochs': 200}
+
     loss_fun = cc.tensor_recovery_loss
     base_tn = cc.random_tn(input_dims, rank=1)
     goal_tn = cc.random_tn(input_dims, rank=rank_list)
     base_tn = cc.make_trainable(base_tn)
-    trained_tn, init_loss, better_loss = discrete_optim_template(base_tn, 
-                                                        goal_tn, loss_fun, 
-                                                        val_data=None, 
-                                                        other_args={'cprint':True, 'epochs':None,'lr':0.01, 'optim':'Adam'})
+    _, _, better_loss = discrete_optim_template(base_tn, goal_tn, loss_fun,
+                                                other_args=exp_params)
     print('better loss = ', better_loss)
 
 

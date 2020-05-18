@@ -517,7 +517,7 @@ def unpack_ranks(in_dims, ranks):
 def print_ranks(tensor_list):
     """Print out the ranks of edges in tensor network"""
     all_shapes = torch.tensor([t.shape for t in tensor_list])
-    print(torch.triu(all_shapes))
+    print(torch.triu(all_shapes).numpy())
 
 def get_indims(tensor_list):
     """Return the input dimensions of nodes in tensor network"""
