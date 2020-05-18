@@ -98,9 +98,10 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     prnt  = other_args['print'] if 'print' in other_args else True
     hist  = other_args['hist']  if 'hist'  in other_args else False
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
-    if early_stop and not has_val:
-        raise ValueError("Early stopping (epochs=None) requires val_data "
-                         "to be input")
+    # Now if early stop and no validation data, use training loss for early stopping
+    # if early_stop and not has_val:
+    #     raise ValueError("Early stopping (epochs=None) requires val_data "
+    #                      "to be input")
     loss_rec, first_loss, best_loss, best_network = [], None, None, None
     if hist: loss_record = ([], [])    # (train_record, val_record)
 
@@ -195,7 +196,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 m_print(f"Early stopping condition reached")
                 break
         else:
-            record_loss(train_loss, tensor_list, ep)
+            if record_loss(train_loss, tensor_list, ep) and early_stop:
+                m_print(f"Early stopping condition reached")
+                break
+
+
         ep += 1
     m_print("")
 
