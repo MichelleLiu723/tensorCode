@@ -220,7 +220,7 @@ def contract_network(nodes, contractor='auto', edge_order=None):
                     order of the indices of the (large) output tensor
 
     Returns:
-        output:     PyTorch tensor containing the contracted network, 
+        output:     Pytorch tensor containing the contracted network, 
                     which here will always be a scalar or batch vector
     """
     contractor = getattr(tn.contractors, contractor)
@@ -239,7 +239,7 @@ def evaluate_input(tensor_rep, input_list):
                      specified as one big dense tensor
         input_list:  Batch of inputs to feed to the cores in our tensor.
                      This can be either a list of matrices with shapes 
-                     (batch_dim, input_dim_i) or a single PyTorch tensor 
+                     (batch_dim, input_dim_i) or a single Pytorch tensor 
                      with shape (num_cores, batch_dim, input_dim)
 
     Returns:
@@ -416,35 +416,35 @@ def copy_network(tensor_list):
                for t, ct in zip(tensor_list, my_copy)]
     return my_copy
 
-def generate_regression_data(target_tensor, batch_dim, noise=1e-5):
+def generate_regression_data(target_tensor, num_data, noise=1e-5):
     """
     Use a target tensor network to get pair of batch (input, output) data
 
     Args:
         target_tensor: List of tensors encoding a target tensor network,
-                     which is used to generate the data
-        batch_dim:   The number of inputs and outputs to generate
-        noise:       Stdev of Guassian noise to add to real output value
+                       which is used to generate the data
+        num_data:     The number of inputs and outputs to generate
+        noise:         Stdev of Guassian noise to add to real output value
 
     Return:
-        rand_ins:    List of matrices, with i'th entry having shape
-                     (batch_dim, input_dim_i), with input_dim_i being the 
-                     i'th visible dimension of target_tensor
-        rand_out:    Vector of length batch_dim holding noisy outputs
+        rand_ins:      List of matrices, with i'th entry having shape
+                       (num_data, input_dim_i), with input_dim_i being 
+                       the i'th visible dimension of target_tensor
+        rand_out:      Vector of length num_data holding noisy outputs
     """
     num_cores = len(target_tensor)
-    indims = torch.tensor(get_indims(target_tensor))
-    rand_ins = [torch.randn((batch_dim, d)) / torch.sqrt(d.float()) 
-                    for d in indims]
+    in_dims = torch.tensor(get_indims(target_tensor))
+    rand_ins = [torch.randn((num_data, d)) / torch.sqrt(d.double()) 
+                    for d in in_dims]
         
     # Convert into tensors when possible
-    if len(set(indims)) == 1:
+    if len(set(in_dims)) == 1:
         rand_ins = torch.tensor(rand_ins)
 
     # Produce outputs in small batches
     eval_fun = partial(evaluate_input, target_tensor)
     num, mini_size, rand_out = 0, 50, []
-    while num < batch_dim:
+    while num < num_data:
         this_in = [r_in[num:num+mini_size] for r_in in rand_ins]
         rand_out.append(evaluate_input(target_tensor, this_in))
         num += mini_size
@@ -454,6 +454,46 @@ def generate_regression_data(target_tensor, batch_dim, noise=1e-5):
     rand_out += noise * torch.randn_like(rand_out)
 
     return rand_ins, rand_out
+
+def generate_completion_data(target_tensor, num_data, noise=1e-5):
+    """
+    Use a target tensor network to get dataset of tensor elements
+
+    Args:
+        target_tensor: List of tensors encoding a target tensor network,
+                       which is used to generate the data
+        num_data:      The number of elements and values to generate
+        noise:         Stdev of Guassian noise to add to tensor elements
+
+    Return:
+        rand_elms:     Random integer-valued Pytorch matrix of shape 
+                       (num_cores, num_data) containing random elements
+                       that target_tensor is evaluated on
+        rand_vals:     Vector of length num_data holding noisy values of 
+                       target_tensor at elements in rand_elms
+    """
+    num_cores = len(target_tensor)
+    in_dims = torch.tensor(get_indims(target_tensor))
+
+    # Generate rand_elms, then convert into one-hot format
+    rand_elms = torch.stack([torch.randint(d, (num_data,)) for d in in_dims])
+    one_hot = torch.functional.F.one_hot
+    rand_ins = [one_hot(vec, d).double()
+                    for vec, d in zip(rand_elms, in_dims)]
+    
+    # Produce outputs in small batches
+    eval_fun = partial(evaluate_input, target_tensor)
+    num, mini_size, rand_vals = 0, 50, []
+    while num < num_data:
+        this_in = [r_in[num:num+mini_size] for r_in in rand_ins]
+        rand_vals.append(evaluate_input(target_tensor, this_in))
+        num += mini_size
+    rand_vals = torch.cat(rand_vals)
+
+    # Add noise to output data
+    rand_vals += noise * torch.randn_like(rand_vals)
+
+    return rand_elms, rand_vals
 
 def unpack_ranks(in_dims, ranks):
     """Converts triangular `ranks` structure to list of tensor shapes"""
@@ -494,7 +534,7 @@ def batch_node(num_inputs, batch_dim):
     Return a network of small CopyNodes which emulates a large CopyNode
 
     This network is used for reproducing the standard batch functionality 
-    available in PyTorch, and requires connecting the `num_inputs` edges
+    available in Pytorch, and requires connecting the `num_inputs` edges
     returned by batch_node to the respective batch indices of our inputs.
     The sole remaining dangling edge will then give the batch index of 
     whatever contraction occurs later with the input.
@@ -614,9 +654,9 @@ def regression_loss(tensor_list, dataset, p=2):
     Args:
         tensor_list: List of tensors encoding a tensor network
         dataset:     Tuple of the form (input_list, targets), with targets 
-                     a PyTorch vector containing target values, and 
+                     a Pytorch vector containing target values, and 
                      input_list either a list of matrices with shapes 
-                     (batch_dim, input_dim_i), or else a single PyTorch 
+                     (batch_dim, input_dim_i), or else a single Pytorch 
                      tensor with shape (num_cores, batch_dim, input_dim)
         p:           Sets which p-norm is used for the loss (default: 2)
 
@@ -626,8 +666,9 @@ def regression_loss(tensor_list, dataset, p=2):
     """
     # Unpack dataset and evaluate inputs using tensor network
     input_list, targets = dataset
+    num_ins = len(targets)
     outputs = evaluate_input(tensor_list, input_list)
-
+    
     return torch.dist(targets, outputs, p=p)
 
 def completion_loss(tensor_list, dataset, p=2):
@@ -638,8 +679,8 @@ def completion_loss(tensor_list, dataset, p=2):
     Args:
         tensor_list: List of tensors encoding a tensor network
         dataset:     Tuple of the form (input_elms, targets), with targets 
-                     a PyTorch vector of target values, and input_elms an 
-                     integer PyTorch matrix of shape (num_cores, batch_dim)
+                     a Pytorch vector of target values, and input_elms an 
+                     integer Pytorch matrix of shape (num_cores, batch_dim)
         p:           Sets which p-norm is used for the loss (default: 2)
 
     Returns:
@@ -650,7 +691,8 @@ def completion_loss(tensor_list, dataset, p=2):
     input_elms, targets = dataset
     in_dims = get_indims(tensor_list)
     one_hot = torch.functional.F.one_hot
-    input_list = [one_hot(vec, d) for vec, d in zip(input_elms, in_dims)]
+    input_list = [one_hot(vec, d).double()
+                      for vec, d in zip(input_elms, in_dims)]
 
     return regression_loss(tensor_list, (input_list, targets), p=p)
 
@@ -668,7 +710,9 @@ def batchify(dataset, batch_size=100, reps=1):
     elif isinstance(dataset, list) and valid_formatting(dataset):
         task = 'recovery'
     elif len(dataset) == 2 and isinstance(dataset[0][0], torch.Tensor):
-        task = 'regression'
+        num_ax = len(dataset[0][0].shape)
+        assert num_ax in [1, 2]
+        task = 'regression' if num_ax == 2 else 'completion'
         inputs, targets = dataset
         tensor_input = isinstance(inputs, torch.Tensor)
     else:
@@ -681,11 +725,12 @@ def batchify(dataset, batch_size=100, reps=1):
             yield dataset
 
         # For regression, return minibatches of (input, target) data
-        elif task == 'regression':
+        elif task in ['regression', 'completion']:
             ind = 0
             while ind < len(dataset):
                 inp = [ip[ind: ind+batch_size] for ip in inputs]
-                if tensor_input: inp = torch.tensor(inp)
+                if tensor_input or task == 'completion':
+                    inp = torch.stack(inp)
                 tar = targets[ind: ind+batch_size]
                 ind += batch_size
 
