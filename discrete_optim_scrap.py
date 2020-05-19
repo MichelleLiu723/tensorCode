@@ -65,6 +65,9 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
                                 discrete optimization       (default=True)
                         dhist:  Whether to return losses
                                 from intermediate TNs       (default=False)
+                        search_epochs: Number of epochs to use to identify the
+                                best rank 1 update. If None, the epochs argument
+                                is used.                    (default=None)
     
     Returns:
         better_list: List of tensors with same length as tensor_list, but
@@ -172,9 +175,18 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
                     print('k = ', k, 'i =', i, 'j = ', j)
                     #print(cc.print_ranks(currentNetwork))
                     #solve continuos optimization part, train_data = target_tensor
-                    [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
-                        loss_fun, val_data=val_data, epochs=search_epochs if search_epochs else epochs, 
-                        other_args=other_args)
+                    if search_epochs:
+                        # we use SGD to identify the most promising rank update
+                        search_args = dict(other_args)
+                        #search_args["optim"] = 'SGD'
+                        #search_args["lr"] = 0.01
+                        [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
+                            loss_fun, val_data=val_data, epochs=search_epochs , 
+                            other_args=search_args)
+                    else:
+                        [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
+                            loss_fun, val_data=val_data, epochs=epochs, 
+                            other_args=other_args)
                     
                     m_print(f"\nCurrent loss is {current_loss:.7f}")
                     if prev_loss > current_loss:
@@ -229,6 +241,8 @@ if __name__ == '__main__':
     
     loss_fun = cc.tensor_recovery_loss
     base_tn = cc.random_tn(input_dims, rank=1)
+    for i in range(len(base_tn)):
+        base_tn[i] /= 100
     goal_tn = cc.random_tn(input_dims, rank=rank_list)
     #goal_tn[0]/=cc.l2_norm(goal_tn)
     base_tn = cc.make_trainable(base_tn)
@@ -237,8 +251,8 @@ if __name__ == '__main__':
     trained_tn, init_loss, better_loss = discrete_optim_template(base_tn, 
                                                         goal_tn, loss_fun, 
                                                         val_data=None, 
-                                                        other_args={'cprint':True, 'epochs':None,'lr':0.01, 'optim':'Rprop',
-                                                        'search_epochs':20})
+                                                        other_args={'cprint':True, 'epochs':1000,'lr':0.01, 'optim':'Rprop',
+                                                        'search_epochs':20, 'cvg_threshold':1e-10})
     print('better loss = ', better_loss)
 
 
