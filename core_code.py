@@ -69,6 +69,13 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                                from train and val sets     (default=False)
                         momentum: Momentum value for 
                                   continuous optimization  (default=0)
+                        cvg_threshold: threshold to test convergence of 
+                            optimization (optimization is stopped if 
+                            |(prev_loss - cur_loss)/prev_loss| <  cvg_threshold
+                            If None, convergence is not checked. If epochs is
+                            set as well, then optimziation is stopped either when
+                            convergence criteria is met or when epochs is reached
+                                                            (default:None)
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
@@ -97,11 +104,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     reps  = other_args['reps']  if 'reps'  in other_args else 1
     prnt  = other_args['print'] if 'print' in other_args else True
     hist  = other_args['hist']  if 'hist'  in other_args else False
+    cvg_threshold  = other_args['cvg_threshold']  if 'cvg_threshold'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
-    # Now if early stop and no validation data, use training loss for early stopping
-    # if early_stop and not has_val:
-    #     raise ValueError("Early stopping (epochs=None) requires val_data "
-    #                      "to be input")
+    if early_stop and not has_val:
+         raise ValueError("Early stopping (epochs=None) requires val_data "
+                          "to be input")
     loss_rec, first_loss, best_loss, best_network = [], None, None, None
     if hist: loss_record = ([], [])    # (train_record, val_record)
 
@@ -169,6 +176,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
 
     # Loop over validation and training for given number of epochs
     ep = 1
+    prev_loss = np.infty
     while epochs is None or ep <= epochs:
 
 
@@ -185,8 +193,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 train_loss += loss
         train_loss /= num_train
         loss_history(train_loss, is_val=False)
-        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.3f}")
-
+        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.10f}      {np.abs(train_loss-prev_loss)/prev_loss}")
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
             # Get and record validation loss, check early stopping condition
@@ -199,6 +206,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             if record_loss(train_loss, tensor_list, ep) and early_stop:
                 print(f"\nEarly stopping condition reached")
                 break
+            if cvg_threshold and np.abs(train_loss-prev_loss)/prev_loss < cvg_threshold:
+                print(f"\nConvergence criteria reached")
+                break
+        prev_loss = train_loss
+
 
 
         ep += 1
