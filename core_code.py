@@ -404,9 +404,11 @@ def random_tn(input_dims=None, rank=1):
         return torch.exp(torch.log(num_el) / (2 * num_cores))
 
     # Use shapes to instantiate random core tensors
+    # The variance of the normal distributions is chosen to make the tensor norm 1 in expectation.
     tensor_list = []
-    for shape in shape_list:
-        tensor_list.append(stdev_fun(shape) * torch.randn(shape))
+    for i,shape in enumerate(shape_list):
+        std = 1/np.power(torch.prod(torch.tensor(shape)) * shape[i],0.25).to(dtype=torch.float)
+        tensor_list.append(std * torch.randn(shape))
 
     return tensor_list
 
