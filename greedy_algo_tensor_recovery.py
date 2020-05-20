@@ -158,7 +158,7 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
             for j in range(i+1, len(initialNetwork)):
                 currentNetwork = cc.copy_network(initialNetwork)
                 #increase rank along a chosen dimension
-                currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-6)
+                currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-10)
 
                 print('testing rank increment for i =', i, 'j = ', j)
                 if search_epochs:
@@ -210,9 +210,9 @@ if __name__ == '__main__':
     d4 = 4
     d5 = 4
     r12 = 2
-    r23 = 2
-    r34 = 2
-    r45 = 2
+    r23 = 3
+    r34 = 4
+    r45 = 5
     r56 = 2
     input_dims = [d0, d1, d2, d3, d4, d5]
     rank_list = [[r12, 1, 1, 1, 1], 
@@ -238,7 +238,7 @@ if __name__ == '__main__':
     trained_tn, init_loss, better_loss = discrete_optim_template(base_tn, 
                                                         goal_tn, loss_fun, 
                                                         val_data=None, 
-                                                        other_args={'cprint':True, 'epochs':1000,'lr':0.01, 'optim':'RMSprop',
+                                                        other_args={'cprint':True, 'epochs':2000,'lr':0.01, 'optim':'RMSprop',
                                                         'search_epochs':20, 'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler})
 
     print('better loss = ', better_loss)
