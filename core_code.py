@@ -14,7 +14,7 @@ import torch.optim as optim
 
 A tensor network is specified as a list of tensors, each of whose shape is
 formatted in a specific way. In particular, for a network with n tensor
-cores, the shape will be:
+cores, the shape will be:   
 
 tensor_i.shape = (r_1, r_2, ..., r_i, ..., r_n),
 
@@ -67,6 +67,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                         reps:  Number of times to repeat 
                                training data per epoch     (default=1)
                         print: Whether to print info       (default=True)
+                        dyn_print: use dynamic printing    (default=False)
                         hist:  Whether to return losses
                                from train and val sets     (default=False)
                         momentum: Momentum value for 
@@ -109,6 +110,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     reps  = other_args['reps']  if 'reps'  in other_args else 1
     prnt  = other_args['print'] if 'print' in other_args else True
     hist  = other_args['hist']  if 'hist'  in other_args else False
+    dyn_print  = other_args['dyn_print']  if 'dyn_print'  in other_args else False
     lr_scheduler  = other_args['lr_scheduler']  if 'lr_scheduler'  in other_args else None
     cvg_threshold  = other_args['cvg_threshold']  if 'cvg_threshold'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
@@ -119,7 +121,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     if hist: loss_record = ([], [])    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `prnt`
-    m_print = lambda s: print(s, end='\r') if prnt else None
+    m_print = lambda s: print(s, end='\r' if dyn_print else '\n') if prnt else None
 
     # Function to record loss information and return whether to stop
     def record_loss(new_loss, new_network, epoch_num):
@@ -186,7 +188,6 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     ep = 1
     prev_loss = np.infty
     while epochs is None or ep <= epochs:
-
 
         # Train network on all the training data
         train_loss, num_train = 0., 0
