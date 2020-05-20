@@ -7,6 +7,8 @@ import torch
 import numpy as np
 import tensornetwork as tn
 import torch.optim as optim
+
+
 """
 ### NOTES ON TENSOR NETWORK FORMAT ###
 
@@ -76,6 +78,9 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                             set as well, then optimziation is stopped either when
                             convergence criteria is met or when epochs is reached
                                                             (default:None)
+                        lr_scheduler: a function taking an optimizer as input
+                        and returning a learning rate scheduler for this optimizer
+                                                            (default:None)
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
@@ -104,6 +109,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     reps  = other_args['reps']  if 'reps'  in other_args else 1
     prnt  = other_args['print'] if 'print' in other_args else True
     hist  = other_args['hist']  if 'hist'  in other_args else False
+    lr_scheduler  = other_args['lr_scheduler']  if 'lr_scheduler'  in other_args else None
     cvg_threshold  = other_args['cvg_threshold']  if 'cvg_threshold'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
     if early_stop and not has_val:
@@ -173,6 +179,8 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     kwargs = {'lr':lr, 'momentum':momentum}    # <- Add new options here
     kwargs = {k: v for (k, v) in kwargs.items() if k in opt_args}
     optim = optim(tensor_list, **kwargs)    # Initialize the optimizer
+    if lr_scheduler: # instantiate learning rate scheduler
+        scheduler = lr_scheduler(optim)
 
     # Loop over validation and training for given number of epochs
     ep = 1
@@ -192,8 +200,12 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 num_train += 1
                 train_loss += loss
         train_loss /= num_train
+
+        if lr_scheduler:
+            scheduler.step(train_loss)
+
         loss_history(train_loss, is_val=False)
-        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.10f}      {np.abs(train_loss-prev_loss)/prev_loss}")
+        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.10f}\t\t Convergence: {np.abs(train_loss-prev_loss)/prev_loss:.10f}")
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
             # Get and record validation loss, check early stopping condition
