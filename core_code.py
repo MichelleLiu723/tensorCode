@@ -82,6 +82,16 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                         lr_scheduler: a function taking an optimizer as input
                         and returning a learning rate scheduler for this optimizer
                                                             (default:None)
+                        save_optimizer_state: if True, other_args should have an empty
+                            dict for the key optimizer_state. This dict will contain 
+                              {optimizer_state: optimizer state_dict,
+                              lr_scheduler_state: scheduler state_dict (if any)}
+                            after the function returns.     (default:False)
+                        load_optimzer_state: a dictionnary that will be used to 
+                            initialize the optimizer (and scheduler if any) from a
+                            previously saved optimizer state.
+                                                            (default: None)
+
     
     Returns:
         better_list: List of tensors with same shape as tensor_list, but
@@ -113,7 +123,13 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     dyn_print  = other_args['dyn_print']  if 'dyn_print'  in other_args else False
     lr_scheduler  = other_args['lr_scheduler']  if 'lr_scheduler'  in other_args else None
     cvg_threshold  = other_args['cvg_threshold']  if 'cvg_threshold'  in other_args else None
+    save_optimizer_state  = other_args['save_optimizer_state']  if 'save_optimizer_state'  in other_args else None
+    load_optimizer_state  = other_args['load_optimizer_state']  if 'load_optimizer_state'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
+
+    if save_optimizer_state and (not 'optimizer_state' in other_args):
+        raise ValueError("an empty dictionnary should be passed as the optimizer_state argument to store the"
+            " optimizer state.")
     if early_stop and not has_val:
          raise ValueError("Early stopping (epochs=None) requires val_data "
                           "to be input")
@@ -175,6 +191,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     # Record the initial validation loss (if we validation dataset)
     if has_val: record_loss(run_val(tensor_list), tensor_list, 0)
 
+
     # Initialize optimizer, using only the keyword args in the 
     optim = getattr(torch.optim, optim)
     opt_args = signature(optim).parameters.keys()
@@ -183,6 +200,10 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     optim = optim(tensor_list, **kwargs)    # Initialize the optimizer
     if lr_scheduler: # instantiate learning rate scheduler
         scheduler = lr_scheduler(optim)
+
+    if load_optimizer_state:
+        optim.load_state_dict(other_args["load_optimizer_state"]["optimizer_state"])
+        scheduler.load_state_dict(other_args["load_optimizer_state"]["lr_scheduler_state"])
 
     # Loop over validation and training for given number of epochs
     ep = 1
@@ -228,6 +249,12 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
 
         ep += 1
     m_print("")
+
+    # Save the optimizer state if needed
+    if save_optimizer_state:
+        other_args["optimizer_state"]["optimizer_state"] = optim.state_dict()
+        if lr_scheduler:
+            other_args["optimizer_state"]["lr_scheduler_state"] = scheduler.state_dict()
 
     if hist:
         loss_record = tuple(torch.tensor(fr) for fr in loss_record)
