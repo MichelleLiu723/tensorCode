@@ -91,6 +91,10 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                             initialize the optimizer (and scheduler if any) from a
                             previously saved optimizer state.
                                                             (default: None)
+                        grad_masking_function: a function taking the list of tensor
+                            parameters between the backward pass and the optimizer step
+                            (can be used to e.g. zero out parts of the gradient)
+                                                            (default: None)
 
     
     Returns:
@@ -125,6 +129,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     cvg_threshold  = other_args['cvg_threshold']  if 'cvg_threshold'  in other_args else None
     save_optimizer_state  = other_args['save_optimizer_state']  if 'save_optimizer_state'  in other_args else None
     load_optimizer_state  = other_args['load_optimizer_state']  if 'load_optimizer_state'  in other_args else None
+    grad_masking_function  = other_args['grad_masking_function']  if 'grad_masking_function'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
 
     if save_optimizer_state and (not 'optimizer_state' in other_args):
@@ -216,6 +221,8 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             loss = loss_fun(tensor_list, batch)
             optim.zero_grad()
             loss.backward()
+            if grad_masking_function:
+                grad_masking_function(tensor_list)
             optim.step()
 
             with torch.no_grad():
@@ -677,6 +684,7 @@ def increase_rank(slim_list, vertex1, vertex2, rank_inc=1, pad_noise=1e-6):
     fat_list = slim_list
     fat_list[vertex1] = pad_tensor(fat_list[vertex1], vertex2)
     fat_list[vertex2] = pad_tensor(fat_list[vertex2], vertex1)
+
     return fat_list
 
 def num_params(tensor_list):
