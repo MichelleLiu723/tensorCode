@@ -26,20 +26,6 @@ On occasion, the ranks are specified in the following triangular format:
      [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}], ...
       ..., [r_{n-2,n-1}, r_{n-2,n}], [r_{n-1,n}]]
 """
-def generate_stop_cond(in_dims):
-    """
-    Example code for how you can produce a stop_cond function that stops
-    optimization when the number of parameters in the TN exceeds the 
-    number of parameters needed to specify the dense tensor itself
-    """
-    # Number of elements in the dense tensor with input dimensions in_dims
-    max_params = torch.prod(torch.tensor(in_dims))
-
-    # The stop_cond function which is output by generate_stop_cond
-    def stop_cond(tensor_list):
-        return cc.num_params(tensor_list) >= max_params
-
-    return stop_cond
 
 def randomwalk_optim(tensor_list, train_data, loss_fun, 
                             val_data=None, other_args=dict()):
@@ -58,21 +44,23 @@ def randomwalk_optim(tensor_list, train_data, loss_fun,
         other_args:  Dictionary of other arguments for the optimization, 
                      with some options below (feel free to add more)
 
-                        epochs:   Number of epochs for 
-                                  continuous optimization     (default=10)
-                        max_iter: Maximum number of iterations
-                                  for random search           (default=10)
-                        optim:    Choice of Pytorch optimizer (default='SGD')
-                        lr:       Learning rate for optimizer (default=1e-3)
-                        bsize:    Minibatch size for training (default=100)
-                        reps:     Number of times to repeat 
-                                  training data per epoch     (default=1)
-                        cprint:   Whether to print info from
-                                  continuous optimization     (default=True)
-                        dprint:   Whether to print info from
-                                  discrete optimization       (default=True)
-                        dhist:    Whether to return losses
-                                  from intermediate TNs       (default=False)
+                        epochs:      Number of epochs for 
+                                     continuous optimization     (default=10)
+                        max_iter:    Maximum number of iterations
+                                     for random search           (default=10)
+                        optim:       Choice of Pytorch optimizer (default='SGD')
+                        lr:          Learning rate for optimizer (default=1e-3)
+                        bsize:       Minibatch size for training (default=100)
+                        reps:        Number of times to repeat 
+                                     training data per epoch     (default=1)
+                        cprint:      Whether to print info from
+                                     continuous optimization     (default=True)
+                        dprint:      Whether to print info from
+                                     discrete optimization       (default=True)
+                        dhist:       Whether to return losses
+                                     from intermediate TNs       (default=False)
+                        loss_threshold: Threshold for discrete 
+                                        optimization             (default=1e-5)
     
     Returns:
         better_list: List of tensors with same length as tensor_list, but
@@ -90,23 +78,49 @@ def randomwalk_optim(tensor_list, train_data, loss_fun,
                      giving the initial loss of the model, and
                      loss_record[-1] equal to best_loss value returned
                      by discrete_optim.
+        loss_hist:   List of losses for every continous and discrete step.
+                     Each element is a tuple of the form (train_loss, val_loss)
+        d_loss_hist: List of losses at end of each discrete optimization step
+                     Each element is a tuple of the form (train_loss, val_loss)
+        param_count: List of number of parameters.
     """
     # Check input and initialize local record variables
     epochs  = other_args['epochs'] if 'epochs' in other_args else 10
     max_iter  = other_args['max_iter'] if 'max_iter' in other_args else 10
     dprint  = other_args['dprint'] if 'dprint' in other_args else True
     dhist  = other_args['dhist']  if 'dhist'  in other_args else False
-    loss_rec, first_loss, best_loss, best_network = [], None, None, None
+    loss_threshold = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-5
+    loss_hist, first_loss, best_loss, best_network = ([],[]), None, None, None
+    d_loss_hist = ([], [])
+    
+    # Keep track of loss in continous optimization
+    other_args['hist'] = True
+    
+    # Record number of parameters for each step
+    param_count = []
+    
     if dhist: loss_record = []    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `dprint`
     m_print = lambda s: print(s) if dprint else None
 
     # Function to record loss information
-    def record_loss(new_loss, new_network):
+    def record_loss(new_loss, new_network, new_loss_hist):
         # Load record variables from outer scope
-        nonlocal loss_rec, first_loss, best_loss, best_network
-
+        nonlocal first_loss, best_loss, best_network, loss_hist, d_loss_hist
+        
+        # Add full loss history
+        loss_hist[0].extend(new_loss_hist[0].tolist())
+        loss_hist[1].extend(new_loss_hist[1].tolist())
+        
+        # Add discrete loss history
+        d_loss_hist[0].append(new_loss_hist[0][-1])
+        d_loss_hist[1].append(new_loss_hist[1][-1])
+        
+        # Track number of parameters of new_network
+        nonlocal param_count
+        param_count.append(cc.num_params(new_network))
+        
         # Check for best loss
         if best_loss is None or new_loss < best_loss:
             best_loss, best_network = new_loss, new_network
@@ -123,55 +137,59 @@ def randomwalk_optim(tensor_list, train_data, loss_fun,
     # optimization procedure. I'm using a simple example here which could
     # work for greedy or random walk searches, but for other optimization
     # methods this could be trivial
-    stop_cond = generate_stop_cond(cc.get_indims(tensor_list))
+    stop_cond = lambda loss: loss < loss_threshold
 
     # Iteratively increment ranks of tensor_list and train via
     # continuous_optim, at each stage using a search procedure to 
     # test out different ranks before choosing just one to increase
     stage = 0
     better_network, better_loss = tensor_list, 1e10
-    while not stop_cond(better_network) and stage < max_iter:
-        if first_loss is None:
-            # Record initial loss of TN model 
-            _, first_loss, _ = cc.continuous_optim(tensor_list, train_data, 
-                                    loss_fun, epochs=1, val_data=val_data,
-                                    other_args=other_args)
-            m_print("Initial model has TN ranks")
-            if dprint: cc.print_ranks(tensor_list)
-            m_print(f"Initial loss is {first_loss:.3f}")
-            continue
-        m_print(f"STAGE {stage}")
-        better_network, ـ, better_loss = cc.continuous_optim(better_network, 
-                                                train_data, loss_fun, 
-                                                epochs=epochs, 
-                                                val_data=val_data,
-                                                other_args=other_args)
-    
+    while not stop_cond(better_loss) and stage < max_iter:
+        stage += 1
+        better_network, ـ, better_loss, new_loss_hist = cc.continuous_optim(
+            better_network,
+            train_data, loss_fun,
+            epochs=epochs,
+            val_data=val_data,
+            other_args=other_args)
+        
         # Randomly pick 2 tensors to increase the bond dimension between them
         idx = torch.randperm(len(better_network))[:2]
+        
         # Create new TN with increased rank
         better_network = cc.increase_rank(better_network, vertex1=idx[0], vertex2=idx[1])
         better_network = cc.make_trainable(better_network)
 
         # Record the loss associated with the best network from this 
         # discrete optimization loop
-        record_loss(better_loss, better_network)
-        stage += 1
+        record_loss(better_loss, better_network, new_loss_hist)
+        m_print(f"STAGE {stage}")
 
     if dhist:
         loss_record = tuple(torch.tensor(fr) for fr in loss_record)
-        return best_network, first_loss, best_loss, loss_record
+        return best_network, first_loss, best_loss, loss_record, loss_hist, param_count, d_loss_hist
     else:
         return best_network, first_loss, best_loss
 
 if __name__ == '__main__':
-    input_dims = [2, 4, 5, 6]
-    rank_list = [[1,2,3], 
-                   [5,8], 
-                    [13]]
-    loss_fun = cc.tensor_recovery_loss
+    np.random.seed(10)
+    torch.manual_seed(10)
+    num_train = 50000
+    num_val = 5000
+    goal_tn = torch.load('tt_cores_5.pt')
+    input_dims = [7,7,7,7,7]
     base_tn = cc.random_tn(input_dims, rank=1)
-    goal_tn = cc.random_tn(input_dims, rank=rank_list)
     base_tn = cc.make_trainable(base_tn)
-    trained_tn, init_loss, final_loss = randomwalk_optim(base_tn, 
-                                                        goal_tn, loss_fun)
+    train_data = cc.generate_regression_data(goal_tn, num_train, noise=1e-6)
+    val_data   = cc.generate_regression_data(goal_tn, num_val,   noise=1e-6)
+    loss_fun = cc.regression_loss
+    best_network, first_loss, best_loss, loss_record, loss_hist, param_count, d_loss_hist = randomwalk_optim(base_tn, 
+                                                                                            train_data, 
+                                                                                            loss_fun, 
+                                                                                            val_data=val_data,
+                                                                                            other_args={
+                                                                                                'dhist':True,
+                                                                                                'optim':'RMSprop',
+                                                                                                'max_iter':20,
+                                                                                                'epochs':None,  # early stopping
+                                                                                                'lr':0.001})
