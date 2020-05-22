@@ -82,6 +82,9 @@ def randomsearch_optim(tensor_list, train_data, loss_fun,
                      giving the initial loss of the model, and
                      loss_record[-1] equal to best_loss value returned
                      by discrete_optim.
+        d_loss_hist: List of losses at end of each discrete optimization step
+                     Each element is a tuple of the form (train_loss, val_loss)
+        param_count: List of number of parameters.
     """
     # Check input and initialize local record variables
     epochs  = other_args['epochs'] if 'epochs' in other_args else 10
@@ -90,16 +93,31 @@ def randomsearch_optim(tensor_list, train_data, loss_fun,
     dhist  = other_args['dhist']  if 'dhist'  in other_args else False
     max_rank = other_args['max_rank'] if 'max_rank' in other_args else 10
     loss_rec, first_loss, best_loss, best_network = [], None, None, None
+    d_loss_hist = ([], [])
     if dhist: loss_record = []    # (train_record, val_record)
+
+    # Record number of parameters for each step
+    param_count = []
+
+    # Keep track of continous optimization history
+    other_args['hist'] = True
 
     # Function to maybe print, conditioned on `dprint`
     m_print = lambda s: print(s) if dprint else None
 
     # Function to record loss information
-    def record_loss(new_loss, new_network):
+    def record_loss(new_loss, new_network, new_loss_hist):
         # Load record variables from outer scope
-        nonlocal loss_rec, first_loss, best_loss, best_network
-
+        nonlocal first_loss, best_loss, best_network, d_loss_hist
+        
+        # Add discrete loss history
+        d_loss_hist[0].append(new_loss_hist[0][-1])
+        d_loss_hist[1].append(new_loss_hist[1][-1])
+        
+        # Track number of parameters of new_network
+        nonlocal param_count
+        param_count.append(cc.num_params(new_network))
+        
         # Check for best loss
         if best_loss is None or new_loss < best_loss:
             best_loss, best_network = new_loss, new_network
@@ -112,12 +130,6 @@ def randomsearch_optim(tensor_list, train_data, loss_fun,
     # Copy tensor_list so the original is unchanged
     tensor_list = cc.copy_network(tensor_list)
 
-    # Define a function giving the stop condition for the discrete 
-    # optimization procedure. I'm using a simple example here which could
-    # work for greedy or random walk searches, but for other optimization
-    # methods this could be trivial
-    stop_cond = generate_stop_cond(cc.get_indims(tensor_list))
-
     # Iteratively increment ranks of tensor_list and train via
     # continuous_optim, at each stage using a search procedure to 
     # test out different ranks before choosing just one to increase
@@ -126,60 +138,55 @@ def randomsearch_optim(tensor_list, train_data, loss_fun,
     n_edges = n_cores*(n_cores-1)//2
     
     stage = 0
-    better_network, better_loss = tensor_list, 1e10
+    better_network, better_loss = tensor_list, np.infty
     while stage < max_iter:
-        if first_loss is None:
-            # Record initial loss of TN model 
-            first_args = other_args
-            first_args["print"] = first_args["hist"] = False
-            _, first_loss, _ = cc.continuous_optim(tensor_list, train_data, 
-                                    loss_fun, epochs=1, val_data=val_data,
-                                    other_args=other_args)
-            m_print("Initial model has TN ranks")
-            if dprint: cc.print_ranks(tensor_list)
-            m_print(f"Initial loss is {first_loss:.3f}")
-            continue
-        m_print(f"STAGE {stage}")
-
-
-        # Try out training different network ranks and assign network
-        # with best ranks to better_networ
-        
+        stage += 1
         # Create new TN random ranks
         ranks = torch.randint(low=1, high=max_rank+1, size=(n_edges,1)).view(-1,).tolist()
         rank_list = _make_ranks(ranks)
         new_tn = cc.random_tn(input_dims, rank=rank_list)
         new_tn  = cc.make_trainable(new_tn)
         
-        new_tn, ـ, new_loss = cc.continuous_optim(new_tn, 
+        new_tn, ـ, new_loss, new_loss_hist = cc.continuous_optim(new_tn, 
                                                   train_data, loss_fun, 
                                                   epochs=epochs, 
                                                   val_data=val_data,
-                                                  other_args=other_args)   
+                                                  other_args=other_args)    
+        
         if new_loss < better_loss:
             better_network = new_tn
             better_loss = new_loss
 
-
         # Record the loss associated with the best network from this 
         # discrete optimization loop
-        record_loss(better_loss, better_network)
-        stage += 1
+        record_loss(better_loss, better_network, new_loss_hist)
+        m_print(f"STAGE {stage}")
 
     if dhist:
         loss_record = tuple(torch.tensor(fr) for fr in loss_record)
-        return best_network, first_loss, best_loss, loss_record
+        return best_network, first_loss, best_loss, loss_record, param_count, d_loss_hist
     else:
         return best_network, first_loss, best_loss
 
 if __name__ == '__main__':
-    input_dims = [2, 4, 5, 6]
-    rank_list = [[1,2,3], 
-                   [5,8], 
-                    [13]]
-    loss_fun = cc.tensor_recovery_loss
+    np.random.seed(10)
+    torch.manual_seed(10)
+    num_train = 50000
+    num_val = 5000
+    goal_tn = torch.load('tt_cores_5.pt')
+    input_dims = [7,7,7,7,7]
     base_tn = cc.random_tn(input_dims, rank=1)
-    goal_tn = cc.random_tn(input_dims, rank=rank_list)
     base_tn = cc.make_trainable(base_tn)
-    trained_tn, init_loss, final_loss = randomsearch_optim(base_tn, 
-                                                        goal_tn, loss_fun)
+    train_data = cc.generate_regression_data(goal_tn, num_train, noise=1e-6)
+    val_data   = cc.generate_regression_data(goal_tn, num_val,   noise=1e-6)
+    loss_fun = cc.regression_loss
+    best_network, first_loss, best_loss, loss_record, param_count, d_loss_hist = randomsearch_optim(base_tn, 
+                                                                                            train_data, 
+                                                                                            loss_fun, 
+                                                                                            val_data=val_data,
+                                                                                            other_args={
+                                                                                                'dhist':True,
+                                                                                                'optim':'RMSprop',
+                                                                                                'max_iter':20,
+                                                                                                'epochs':None,  # early stopping
+                                                                                                'lr':0.001})
