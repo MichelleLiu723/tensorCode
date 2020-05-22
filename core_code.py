@@ -208,7 +208,8 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
 
     if load_optimizer_state:
         optim.load_state_dict(other_args["load_optimizer_state"]["optimizer_state"])
-        scheduler.load_state_dict(other_args["load_optimizer_state"]["lr_scheduler_state"])
+        if lr_scheduler:
+            scheduler.load_state_dict(other_args["load_optimizer_state"]["lr_scheduler_state"])
 
     # Loop over validation and training for given number of epochs
     ep = 1
@@ -234,6 +235,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             scheduler.step(train_loss)
 
         loss_history(train_loss, is_val=False)
+        
         m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.10f}\t\t Convergence: {np.abs(train_loss-prev_loss)/prev_loss:.10f}")
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
@@ -252,7 +254,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 break
         prev_loss = train_loss
 
-
+    
 
         ep += 1
     m_print("")
