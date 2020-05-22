@@ -11,6 +11,16 @@ from copy import deepcopy
 
 def training(tensor_list, initial_epochs, train_data, 
             loss_fun, val_data, epochs, other_args):
+    """
+    This function run the continuous optimization routine with a small tweak: if there is no improvement of the loss in the 
+    first [initial_epochs] epochs, the learning rate is reduced by a factor of 0.5 and optimization is restarted from the beginning,
+    All arguments are the same as cc.continuous_optim except for [initial_epochs].
+    """
+
+    if initial_epochs is None:
+        return cc.continuous_optim(currentNetwork, train_data, 
+            loss_fun, val_data=val_data, epochs=epochs, other_args=args)
+
     args = deepcopy(other_args)
     args["hist"] = True
     current_network_optimizer_state = other_args["optimizer_state"] if "optimizer_state" in args else {}
@@ -22,7 +32,6 @@ def training(tensor_list, initial_epochs, train_data,
     while hist is None or (hist[0][0] < hist[0][-1]):
         if hist:
             if "load_optimizer_state" in args and args["load_optimizer_state"]:
-                #print(args["load_optimizer_state"])
                 args["load_optimizer_state"]["optimizer_state"]['param_groups'][0]['lr'] /= 2
                 lr = args["load_optimizer_state"]["optimizer_state"]['param_groups'][0]['lr']
             else:
@@ -37,10 +46,11 @@ def training(tensor_list, initial_epochs, train_data,
     args["load_optimizer_state"] = current_network_optimizer_state
     [currentNetwork, first_loss, current_loss, hist] = cc.continuous_optim(currentNetwork, train_data, 
             loss_fun, val_data=val_data, epochs=remaining_epochs, other_args=args)
-    #print(':',current_network_optimizer_state)
-    #other_args["optimizer_state"] = current_network_optimizer_state
     
     return [currentNetwork, first_loss, current_loss, hist] if "hist" in other_args else [currentNetwork, first_loss, current_loss]
+
+
+
 
 def discrete_optim_template(tensor_list, train_data, loss_fun, 
                             val_data=None, other_args=dict(),max_iter=None):
@@ -76,6 +86,10 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
                         loss_threshold: if loss gets below this threshold, 
                         discrete optimization is stopped
                                                             (default=1e-5)
+                        initial_epochs: Number of epochs after which the 
+                        learning rate is reduced and optimization is restarted
+                        if there is no improvement in the loss.
+                                                            (default=None)
     
     Returns:
         better_list: List of tensors with same length as tensor_list, but
@@ -101,6 +115,7 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
     dhist  = other_args['dhist']  if 'dhist'  in other_args else False
     search_epochs  = other_args['search_epochs']  if 'search_epochs'  in other_args else None
     loss_threshold  = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-5
+    initial_epochs  = other_args['initial_epochs'] if 'initial_epochs' in other_args else None
     stop_cond = lambda loss: loss < loss_threshold
 
 
@@ -126,7 +141,6 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
         iter += 1
 
         if best_loss is np.infty: # first continuous optimization
-            # Record initial loss of TN model 
             tensor_list, first_loss, best_loss = training(tensor_list, 10, train_data, 
                                     loss_fun, epochs=epochs, val_data=val_data,
                                     other_args=other_args)
@@ -153,7 +167,7 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
 
 
                 print('\ntesting rank increment for i =', i, 'j = ', j)
-                if search_epochs:
+                if search_epochs: # we d only a few epochs to identify the most promising rank update
 
                     # function to zero out the gradient of all entries except for the new slices
                     def grad_masking_function(tensor_list):
@@ -174,7 +188,7 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
                     search_args["save_optimizer_state"] = True
                     search_args["optimizer_state"] = current_network_optimizer_state
                     search_args["grad_masking_function"] = grad_masking_function
-                    [currentNetwork, first_loss, current_loss, hist] = training(currentNetwork, 10, train_data, 
+                    [currentNetwork, first_loss, current_loss, hist] = training(currentNetwork, initial_epochs, train_data, 
                         loss_fun, val_data=val_data, epochs=search_epochs, other_args=search_args)
                     first_loss = hist[0][0]
 
@@ -182,12 +196,12 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
                     print("\noptimize all parameters for a few epochs")
                     search_args["grad_masking_function"] = None
                     search_args["load_optimizer_state"] = dict(current_network_optimizer_state)
-                    [currentNetwork, first_loss, current_loss, hist] = training(currentNetwork, 10, train_data, 
+                    [currentNetwork, first_loss, current_loss, hist] = training(currentNetwork, initial_epochs, train_data, 
                         loss_fun, val_data=val_data, epochs=search_epochs , 
                         other_args=search_args)
                     search_args["load_optimizer_state"] = None
 
-                else:
+                else: # we fully optimize the network in the search phase
                     [currentNetwork, first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
                         loss_fun, val_data=val_data, epochs=epochs, 
                         other_args=other_args)
@@ -211,12 +225,10 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
             current_network_optimizer_state = {}
             other_args["save_optimizer_state"] = True
             other_args["optimizer_state"] = current_network_optimizer_state
-            [best_network, first_loss, best_loss] = training(best_network, 10, train_data, 
+            [best_network, first_loss, best_loss] = training(best_network, initial_epochs, train_data, 
                     loss_fun, val_data=val_data, epochs=epochs, 
                     other_args=other_args)
             other_args["load_optimizer_state"] = None
-            #print(current_network_optimizer_state["optimizer_state"])
-            #other_args["lr"] = current_network_optimizer_state["optimizer_state"]["param_groups"][0]["lr"]
 
         initialNetwork  = cc.copy_network(best_network)
         loss_record.append((iter, cc.num_params(best_network), float(best_loss)))
@@ -224,16 +236,16 @@ def discrete_optim_template(tensor_list, train_data, loss_fun,
         cc.print_ranks(best_network)
         print('number of params:',cc.num_params(best_network))
         print(loss_record)
-    return best_network, first_loss, best_loss #, loss_record
+    return best_network, first_loss, best_loss 
 
 #for testing
 
 if __name__ == '__main__':
-    #torch.manual_seed(0)
-    #Target tensor is a chain
-    #Tensor decomposition
+
     torch.manual_seed(0)
 
+    # Old target:
+    #
     # d0,d1,d2,d3,d4,d5   = 4,4,4,4,4,4
     # r12,r23,r34,r45,r56 =  2,3,6,5,4
     # input_dims = [d0, d1, d2, d3, d4, d5]
@@ -243,6 +255,7 @@ if __name__ == '__main__':
     #                           [r45, 1],
     #                                [r56]]
 
+    # New target
     d0,d1,d2,d3,d4   = 7,7,7,7,7
     r12,r23,r34,r45 =  2,3,6,5
 
@@ -254,6 +267,7 @@ if __name__ == '__main__':
     
     loss_fun = cc.tensor_recovery_loss
     base_tn = cc.random_tn(input_dims, rank=1)
+    
     # Initialize the first tensor network close to zero
     for i in range(len(base_tn)):
         base_tn[i] /= 10
@@ -272,7 +286,7 @@ if __name__ == '__main__':
                                                         val_data=None, 
                                                         other_args={'cprint':True, 'epochs':1e10,'lr':0.01, 'optim':'RMSprop',
                                                         'search_epochs':80, 'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler,
-                                                        'dyn_print':True})
+                                                        'dyn_print':True, 'initial_epochs':10})
 
     print('better loss = ', better_loss)
 
