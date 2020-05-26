@@ -317,8 +317,8 @@ if __name__ == '__main__':
     lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=200, verbose=True,threshold=1e-7)
     trained_tn, init_loss, better_loss = greedy_optim(base_tn, 
                                                       goal_tn, loss_fun, 
-                                                      val_data=goal_tn, #None, 
-                                                      other_args={'cprint':True, 'epochs':None, 'max_iter':20, 
+                                                      #val_data=goal_tn, #None, 
+                                                      other_args={'cprint':True, 'epochs':1e10, 'max_iter':20, 
                                                                   'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
                                                                   'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler, 
                                                                   'dyn_print':True, 'initial_epochs':10})
