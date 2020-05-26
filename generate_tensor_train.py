@@ -5,8 +5,8 @@ import torch
 
 import core_code as cc
 
-np.random.seed(1)
-torch.manual_seed(1)
+np.random.seed(0)
+torch.manual_seed(0)
 
 def generate_tensor_train(input_dims, tt_ranks):
     """
@@ -33,5 +33,6 @@ def generate_tensor_train(input_dims, tt_ranks):
 if __name__ == '__main__':
     input_dims = [7,7,7,7,7]
     tt_ranks = [2,3,6,5]
+
     tt_cores = generate_tensor_train(input_dims, tt_ranks)
     torch.save(tt_cores, 'tt_cores_5.pt')

@@ -119,7 +119,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
     loss_threshold  = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-5
     initial_epochs  = other_args['initial_epochs'] if 'initial_epochs' in other_args else None
     stop_cond = lambda loss: loss < loss_threshold
-    loss_threshold = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-4 # 1e-5
+    #loss_threshold = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-4 # 1e-5
     loss_hist, first_loss, best_loss, best_network = ([],[]), None, None, None
     d_loss_hist = ([], [])
 
@@ -294,10 +294,10 @@ if __name__ == '__main__':
     r12,r23,r34,r45 =  2,3,6,5
 
     input_dims = [d0, d1, d2, d3, d4]
-    # rank_list = [[r12, 1, 1, 1], 
-    #                  [r23,1, 1], 
-    #                      [r34, 1],
-    #                           [r45]]
+    rank_list = [[r12, 1, 1, 1], 
+                     [r23,1, 1], 
+                         [r34, 1],
+                              [r45]]
     
     loss_fun = cc.tensor_recovery_loss
     base_tn = cc.random_tn(input_dims, rank=1)
@@ -307,6 +307,7 @@ if __name__ == '__main__':
         base_tn[i] /= 10
     base_tn = cc.make_trainable(base_tn)
     goal_tn = torch.load('tt_cores_5.pt')
+    
     print('target tensor network number of params: ', cc.num_params(goal_tn))
     print('number of params for full target tensor:', np.prod(input_dims))
     print('target tensor norm:', cc.l2_norm(goal_tn))
