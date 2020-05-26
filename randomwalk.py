@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import random
 from functools import partial, reduce
+from copy import deepcopy
 
 import torch
 import numpy as np
@@ -26,6 +27,20 @@ On occasion, the ranks are specified in the following triangular format:
      [[r_{1,2}, r_{1,3}, ..., r_{1,n}], [r_{2,3}, ..., r_{2,n}], ...
       ..., [r_{n-2,n-1}, r_{n-2,n}], [r_{n-1,n}]]
 """
+def training(tensor_list, train_data, loss_fun, epochs,
+             val_data=None, other_args=dict()):
+    """Run continuous optimization with adaptive learning rate"""
+    args_copy = deepcopy(other_args)
+    hist = None
+    while hist is None or (hist[0][0] < hist[0][-1]):
+        args_copy["lr"] /= 2
+        currentNetwork, first_loss, current_loss, hist = cc.continuous_optim(
+                                                    tensor_list, train_data, 
+                                                    loss_fun, val_data=val_data, 
+                                                    epochs=epochs, 
+                                                    other_args=args_copy)
+    
+    return currentNetwork, first_loss, current_loss, hist
 
 def randomwalk_optim(tensor_list, train_data, loss_fun, 
                             val_data=None, other_args=dict()):
@@ -146,7 +161,7 @@ def randomwalk_optim(tensor_list, train_data, loss_fun,
     better_network, better_loss = tensor_list, 1e10
     while not stop_cond(better_loss) and stage < max_iter:
         stage += 1
-        better_network, ـ, better_loss, new_loss_hist = cc.continuous_optim(
+        better_network, ـ, better_loss, new_loss_hist = training(
             better_network,
             train_data, loss_fun,
             epochs=epochs,
@@ -183,13 +198,19 @@ if __name__ == '__main__':
     train_data = cc.generate_regression_data(goal_tn, num_train, noise=1e-6)
     val_data   = cc.generate_regression_data(goal_tn, num_val,   noise=1e-6)
     loss_fun = cc.regression_loss
+    
+    from torch.optim.lr_scheduler import ReduceLROnPlateau
+    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=200, verbose=True,threshold=1e-7)
+    
     best_network, first_loss, best_loss, loss_record, loss_hist, param_count, d_loss_hist = randomwalk_optim(base_tn, 
                                                                                             train_data, 
                                                                                             loss_fun, 
-                                                                                            val_data=val_data,
+                                                                                            val_data=None,
                                                                                             other_args={
                                                                                                 'dhist':True,
                                                                                                 'optim':'RMSprop',
                                                                                                 'max_iter':20,
-                                                                                                'epochs':None,  # early stopping
-                                                                                                'lr':0.001})
+                                                                                                'epochs':1e10,  # early stopping
+                                                                                                'cvg_threshold':1e-10, 
+                                                                                                'lr_scheduler':lr_scheduler, 
+                                                                                                'lr':0.01})
