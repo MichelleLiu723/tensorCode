@@ -186,7 +186,6 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             val_loss.append(loss_fun(t_list, batch))
         if has_val:
             val_loss = torch.mean(torch.tensor(val_loss))
-            m_print(f"    Val. loss:  {val_loss.data:.3f}")
 
         return val_loss
 
@@ -236,11 +235,14 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
 
         loss_history(train_loss, is_val=False)
         
-        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\tTrain loss: {train_loss.data:.10f}\t\t Convergence: {np.abs(train_loss-prev_loss)/prev_loss:.10f}")
+        if has_val:
+            val_loss = run_val(tensor_list)
+            
+        val_loss_str = f"Val. loss:  {val_loss.data:.10f}" if has_val else ""
+        m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\t{val_loss_str}\t\t Train loss: {train_loss.data:.10f}\t\t Convergence: {np.abs(train_loss-prev_loss)/prev_loss:.10f}")
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
             # Get and record validation loss, check early stopping condition
-            val_loss = run_val(tensor_list)
             loss_history(val_loss, is_val=True)
             if record_loss(val_loss, tensor_list, ep) and early_stop:
                 print(f"\nEarly stopping condition reached")
