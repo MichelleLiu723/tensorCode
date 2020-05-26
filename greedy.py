@@ -39,14 +39,20 @@ def training(tensor_list, initial_epochs, train_data,
                 lr = args["lr"]
             print(f"\n[!] No progress in first {initial_epochs} epochs, starting again with smaller learning rate ({lr})")
             currentNetwork = cc.copy_network(tensor_list)
-        [currentNetwork, first_loss, current_loss, hist] = cc.continuous_optim(currentNetwork, train_data, 
+        [currentNetwork, first_loss, current_loss, best_epoch, hist] = cc.continuous_optim(currentNetwork, train_data, 
             loss_fun, val_data=val_data, epochs=initial_epochs, other_args=args)
 
+    hist_initial = [h[:best_epoch].tolist() for h in hist]
+    best_epoch_initial = best_epoch
+
     args["load_optimizer_state"] = current_network_optimizer_state
-    [currentNetwork, first_loss, current_loss, hist] = cc.continuous_optim(currentNetwork, train_data, 
+    [currentNetwork, first_loss, current_loss, best_epoch, hist] = cc.continuous_optim(currentNetwork, train_data, 
             loss_fun, val_data=val_data, epochs=remaining_epochs, other_args=args)
     
-    return [currentNetwork, first_loss, current_loss, hist] if "hist" in other_args else [currentNetwork, first_loss, current_loss]
+    hist = [h_init + h[:best_epoch].tolist() for h_init,h in zip(hist_initial,hist)]
+    best_epoch += best_epoch_initial
+
+    return [currentNetwork, first_loss, current_loss, best_epoch, hist] if "hist" in other_args else [currentNetwork, first_loss, current_loss]
 
 
 
@@ -79,8 +85,6 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                                 continuous optimization     (default=True)
                         dprint: Whether to print info from
                                 discrete optimization       (default=True)
-                        dhist:  Whether to return losses
-                                from intermediate TNs       (default=False)
                         search_epochs: Number of epochs to use to identify the
                                 best rank 1 update. If None, the epochs argument
                                 is used.                    (default=None)
@@ -97,69 +101,47 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                      having been optimized using the discrete optimization
                      algorithm. The TN ranks of better_list will be larger
                      than those of tensor_list.
-        first_loss:  Initial loss of the model on the validation set, 
-                     before any training. If no val set is provided, the
-                     first training loss is instead returned
         best_loss:   The value of the validation/training loss for the
                      model output as better_list
-        loss_record: If dhist=True in other_args, all values of best_loss
-                     associated with intermediate optimized TNs will be
-                     returned as a PyTorch vector, with loss_record[0]
-                     giving the initial loss of the model, and
-                     loss_record[-1] equal to best_loss value returned
-                     by discrete_optim.
+        loss_record: If dhist=True in other_args, this records the history of 
+                     all losses for discrete and continuous optimization. This
+                     is a list of dictionnaries with keys
+                           iter,num_params,network,loss,train_loss_hist
+                     where
+                     iter: iteration of the discrete optimization
+                     num_params: number of parameters of best network for this iteration
+                     network: list of tensors for the best network for this iteration
+                     loss: loss achieved by the best network in this iteration
+                     train_loss_hist: history of losses for the continuous optimization
+                        for this iteration starting from previous best_network to 
+                        the epoch where the new best network was found
+                     TODO: add val_lost_hist to the list of keys
     """
     # Check input and initialize local record variables
     epochs  = other_args['epochs'] if 'epochs' in other_args else 10
     max_iter  = other_args['max_iter'] if 'max_iter' in other_args else 10
     dprint  = other_args['dprint'] if 'dprint' in other_args else True
     cprint  = other_args['cprint'] if 'cprint' in other_args else True
-    dhist  = other_args['dhist']  if 'dhist'  in other_args else False
-    search_epochs  = other_args['search_epochs']  if 'search_epochs'  in other_args else None
+    search_epochs  = other_args['search_epochs']  if 'search_epochs'  in other_args else epochs
     loss_threshold  = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-5
     initial_epochs  = other_args['initial_epochs'] if 'initial_epochs' in other_args else None
-    stop_cond = lambda loss: loss < loss_threshold
-    #loss_threshold = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-4 # 1e-5
-    loss_hist, first_loss, best_loss, best_network = ([],[]), None, None, None
+
+    first_loss, best_loss, best_network = ([],[]), None, None
     d_loss_hist = ([], [])
 
-    # Record number of parameters for each step
-    param_count = []
 
-    if dhist: loss_record = []    # (train_record, val_record)
+    other_args['hist'] = True # we always track the history of losses
 
     # Function to maybe print, conditioned on `dprint`
     m_print = lambda s: print(s) if dprint else None
- # Function to record loss information
-    def record_loss(new_loss, new_network, new_loss_hist):
-        # Load record variables from outer scope
-        nonlocal first_loss, best_loss, best_network, loss_hist, d_loss_hist
-        
-        # Add full loss history
-        # loss_hist[0].extend(new_loss_hist[0].tolist())
-        # loss_hist[1].extend(new_loss_hist[1].tolist())
-       # loss_hist[0].extend(new_loss_hist.tolist())
-       # loss_hist[1].extend(new_loss_hist.tolist())
-        
-        # Add discrete loss history
-        d_loss_hist[0].append(new_loss_hist[0][-1])
-        d_loss_hist[1].append(new_loss_hist[1][-1])
-        
-        # Track number of parameters of new_network
-        nonlocal param_count
-        param_count.append(cc.num_params(new_network))
-        
-        # Check for best loss
-        if best_loss is None or new_loss < best_loss:
-            best_loss, best_network = new_loss, new_network
 
-        # Add new loss to our loss record
-        if not dhist: return
-        nonlocal loss_record
-        loss_record.append(new_loss)
+
 
     # Copy tensor_list so the original is unchanged
     tensor_list = cc.copy_network(tensor_list)
+    loss_record = [{'iter':-1,'network':tensor_list,
+            'num_params':cc.num_params(tensor_list),
+            'train_loss_hist':[0]}]  
 
     # Define a function giving the stop condition for the discrete 
     # optimization procedure. I'm using a simple example here which could
@@ -170,34 +152,43 @@ def greedy_optim(tensor_list, train_data, loss_fun,
     # Iteratively increment ranks of tensor_list and train via
     # continuous_optim, at each stage using a search procedure to 
     # test out different ranks before choosing just one to increase
-    stage = 0
-    loss_record, best_loss, best_network = [], np.infty, None
+    stage = -1
+    best_loss, best_network = np.infty, None
 
     while not stop_cond(best_loss) and stage < max_iter:
         stage += 1
         if best_loss is np.infty: # first continuous optimization
-            tensor_list, first_loss, best_loss = training(
-                tensor_list, initial_epochs, train_data, loss_fun, epochs=epochs, 
-                val_data=val_data,other_args=other_args)
+            tensor_list, first_loss, best_loss, best_epoch, hist = training(tensor_list, initial_epochs, 
+                                    train_data, loss_fun, epochs=epochs, 
+                                    val_data=val_data,other_args=other_args)
             m_print("Initial model has TN ranks")
             if dprint: cc.print_ranks(tensor_list)
             m_print(f"Initial loss is {best_loss:.7f}")
 
             initialNetwork = cc.copy_network(tensor_list) 
             best_network = cc.copy_network(tensor_list) 
-            loss_record += [first_loss,best_loss]
+            loss_record[0]["loss"] = first_loss
+            loss_record.append({'iter':stage,
+                'network':best_network,
+                'num_params':cc.num_params(best_network),
+                'loss':best_loss,
+                'train_loss_hist':hist[0][:best_epoch]})
 
+        else:
+            m_print(f"\n\n**** Discrete optimization - iteration {stage} ****\n\n\n")  
+            best_search_loss = best_loss
+            best_train_lost_hist = None
 
-        m_print(f"\n\n**** Discrete optimization - iteration {stage} ****\n\n\n")  
-        best_search_loss = best_loss
-        for i in range(len(initialNetwork)):
-            for j in range(i+1, len(initialNetwork)):
-                currentNetwork = cc.copy_network(initialNetwork)
-                #increase rank along a chosen dimension
-                currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-6)
-                currentNetwork = cc.make_trainable(currentNetwork)
-                print('\ntesting rank increment for i =', i, 'j = ', j)
-                if search_epochs: # we d only a few epochs to identify the most promising rank update
+            for i in range(len(initialNetwork)):
+                for j in range(i+1, len(initialNetwork)):
+                    currentNetwork = cc.copy_network(initialNetwork)
+                    #increase rank along a chosen dimension
+                    currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-6)
+                    currentNetwork = cc.make_trainable(currentNetwork)
+                    print('\ntesting rank increment for i =', i, 'j = ', j)
+
+                    ### Search optimization phase
+                    # we d only a few epochs to identify the most promising rank update
 
                     # function to zero out the gradient of all entries except for the new slices
                     def grad_masking_function(tensor_list):
@@ -213,64 +204,66 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                     # we first optimize only the new slices for a few epochs
                     print("optimize new slices for a few epochs")
                     search_args = dict(other_args)
-                    search_args["hist"] = True
                     current_network_optimizer_state = {}
                     search_args["save_optimizer_state"] = True
                     search_args["optimizer_state"] = current_network_optimizer_state
                     search_args["grad_masking_function"] = grad_masking_function
-                    [currentNetwork, first_loss, current_loss, hist] = training(currentNetwork, initial_epochs, train_data, 
+                    [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
                         loss_fun, val_data=val_data, epochs=search_epochs, other_args=search_args)
                     first_loss = hist[0][0]
+                    train_lost_hist = deepcopy(hist[0][:best_epoch])
 
                     # We then optimize all parameters for a few epochs
                     print("\noptimize all parameters for a few epochs")
                     search_args["grad_masking_function"] = None
                     search_args["load_optimizer_state"] = dict(current_network_optimizer_state)
-                    [currentNetwork, first_loss, current_loss, hist] = training(currentNetwork, initial_epochs, train_data, 
-                        loss_fun, val_data=val_data, epochs=search_epochs , 
+                    [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
+                        loss_fun, val_data=val_data, epochs=search_epochs, 
                         other_args=search_args)
                     search_args["load_optimizer_state"] = None
+                    train_lost_hist += deepcopy(hist[0][:best_epoch])
 
-                else: # we fully optimize the network in the search phase
-                    [currentNetwork,  first_loss, current_loss] = cc.continuous_optim(currentNetwork, train_data, 
-                        loss_fun, val_data=val_data, epochs=epochs, 
-                        other_args=other_args)
-                # Record the loss associated with the best network from this 
-                # discrete optimization loop 
-               # record_loss(first_loss, currentNetwork ,current_loss)
-               # m_print(f"STAGE {stage}")
 
-                m_print(f"\nCurrent loss is {current_loss:.7f}    Best loss from previous discrete optim is {best_loss}")
-                if best_search_loss > current_loss:
-                    best_search_loss = current_loss
-                    best_network = currentNetwork
-                    best_network_optimizer_state = deepcopy(current_network_optimizer_state)
-                    print('-> best rank update so far:', i,j)
-        best_loss = best_search_loss
-        # train network to convergence for the best rank increment (if search_epochs is set, 
-        # otherwise the best network is already trained to convergence / max_epochs)
-        if search_epochs:
+
+                    m_print(f"\nCurrent loss is {current_loss:.7f}    Best loss from previous discrete optim is {best_loss}")
+                    if best_search_loss > current_loss:
+                        best_search_loss = current_loss
+                        best_network = currentNetwork
+                        best_network_optimizer_state = deepcopy(current_network_optimizer_state)
+                        best_train_lost_hist = train_lost_hist
+                        print('-> best rank update so far:', i,j)
+
+
+            best_loss = best_search_loss
+            # train network to convergence for the best rank increment
+
             print('\ntraining best network until max_epochs/convergence...')
             other_args["load_optimizer_state"] = best_network_optimizer_state
             current_network_optimizer_state = {}
             other_args["save_optimizer_state"] = True
             other_args["optimizer_state"] = current_network_optimizer_state
-            [best_network, first_loss, best_loss] = training(best_network, initial_epochs, train_data, 
+            [best_network, first_loss, best_loss, best_epoch, hist] = training(best_network, initial_epochs, train_data, 
                     loss_fun, val_data=val_data, epochs=epochs, 
                     other_args=other_args)
             other_args["load_optimizer_state"] = None
+            best_train_lost_hist += deepcopy(hist[0][:best_epoch])
 
-        initialNetwork  = cc.copy_network(best_network)
-        loss_record.append((stage, cc.num_params(best_network), float(best_loss)))
-        print('\nbest TN:')
-        cc.print_ranks(best_network)
-        print('number of params:',cc.num_params(best_network))
-        print(loss_record)
-    if dhist:
-        loss_record = tuple(torch.tensor(fr) for fr in loss_record)
-        return best_network, first_loss, best_loss, loss_record, param_count, d_loss_hist
-    else:
-        return best_network, first_loss, best_loss
+
+            initialNetwork  = cc.copy_network(best_network)
+
+            loss_record.append({'iter':stage,
+                'network':best_network,
+                'num_params':cc.num_params(best_network),
+                'loss':best_loss,
+                'train_loss_hist':best_train_lost_hist})
+
+            print('\nbest TN:')
+            cc.print_ranks(best_network)
+            print('number of params:',cc.num_params(best_network))
+            print([(r['iter'],r['num_params'],float(r['loss']),float(r['train_loss_hist'][0]),float(r['train_loss_hist'][-1])) for r in loss_record])
+
+    return best_network, best_loss, loss_record
+
 
 #for testing
 
@@ -307,7 +300,7 @@ if __name__ == '__main__':
         base_tn[i] /= 10
     base_tn = cc.make_trainable(base_tn)
     goal_tn = torch.load('tt_cores_5.pt')
-    
+
     print('target tensor network number of params: ', cc.num_params(goal_tn))
     print('number of params for full target tensor:', np.prod(input_dims))
     print('target tensor norm:', cc.l2_norm(goal_tn))
@@ -315,12 +308,12 @@ if __name__ == '__main__':
 
     from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=200, verbose=True,threshold=1e-7)
-    trained_tn, init_loss, better_loss = greedy_optim(base_tn, 
+    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=100, verbose=True,threshold=1e-7)
+    trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
                                                       goal_tn, loss_fun, 
                                                       #val_data=goal_tn, #None, 
                                                       other_args={'cprint':True, 'epochs':1e10, 'max_iter':20, 
                                                                   'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
                                                                   'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler, 
-                                                                  'dyn_print':True, 'initial_epochs':10})
+                                                                  'dyn_print':False,'initial_epochs':10})
  
