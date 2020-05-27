@@ -2,12 +2,13 @@
 import sys
 import pylab as plt
 import pickle
+plt.style.use('ggplot')
 
 if __name__ == '__main__':
 	if len(sys.argv) < 2:
 		print(f"usage: python {sys.argv[0]} [results-pickle-file]\n \t results-pickle-file: pickle file containing results")
 
-	with open('results-tt-cores-5.pickle','rb') as f:
+	with open(sys.argv[1],'rb') as f:
 		results = pickle.load(f)
 	methods = results.keys()
 
