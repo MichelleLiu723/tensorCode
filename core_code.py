@@ -95,6 +95,9 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                             parameters between the backward pass and the optimizer step
                             (can be used to e.g. zero out parts of the gradient)
                                                             (default: None)
+                        stop_condition: a function taking the training and validation loss
+                            as input after each epoch and returning True if optimization 
+                            should be stopped               (default: None)
 
     
     Returns:
@@ -132,6 +135,8 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     load_optimizer_state  = other_args['load_optimizer_state']  if 'load_optimizer_state'  in other_args else None
     grad_masking_function  = other_args['grad_masking_function']  if 'grad_masking_function'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
+
+    stop_condition  = other_args['stop_condition']  if 'stop_condition'  in other_args else None
 
     if save_optimizer_state and (not 'optimizer_state' in other_args):
         raise ValueError("an empty dictionnary should be passed as the optimizer_state argument to store the"
@@ -214,6 +219,9 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     # Loop over validation and training for given number of epochs
     ep = 1
     prev_loss = np.infty
+
+
+
     while epochs is None or ep <= epochs:
 
         # Train network on all the training data
@@ -228,10 +236,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             if grad_masking_function:
                 grad_masking_function(tensor_list)
             optim.step()
-
+            
             with torch.no_grad():
                 num_train += 1
                 train_loss += loss
+
         train_loss /= num_train
 
         if lr_scheduler:
@@ -239,11 +248,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
 
         loss_history(train_loss, is_val=False)
         
-        if has_val:
-            val_loss = run_val(tensor_list)
+        val_loss = run_val(tensor_list) if has_val else None
 
         val_loss_str = f"Val. loss:  {val_loss.data:.10f}" if has_val else ""
         m_print(f"EPOCH {ep} {'('+str(reps)+' reps)' if reps > 1 else ''}\t\t{val_loss_str}\t\t Train loss: {train_loss.data:.10f}\t\t Convergence: {np.abs(train_loss-prev_loss)/prev_loss:.10f}")
+
         # Get validation loss if we have it, otherwise record training loss
         if has_val:
             # Get and record validation loss, check early stopping condition
@@ -252,12 +261,15 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
                 print(f"\nEarly stopping condition reached")
                 break
         else:
-            if record_loss(train_loss, prev_tensor_list, ep) and early_stop:
-                print(f"\nEarly stopping condition reached")
-                break
-            if cvg_threshold and np.abs(train_loss-prev_loss)/prev_loss < cvg_threshold:
-                print(f"\nConvergence criteria reached")
-                break
+            record_loss(train_loss, prev_tensor_list, ep)
+
+        if cvg_threshold and np.abs(train_loss-prev_loss)/prev_loss < cvg_threshold:
+            print(f"\nConvergence criteria reached")
+            break
+        if stop_condition and stop_condition(train_loss=train_loss,val_loss=val_loss):
+            print(f"\nStopping condition reached")
+            break
+
         prev_loss = train_loss
 
     
@@ -746,7 +758,7 @@ def regression_loss(tensor_list, dataset, p=2):
     
     return torch.dist(targets, outputs, p=p)
 
-def completion_loss(tensor_list, dataset, p=2):
+def completion_loss(tensor_list, dataset, p=2, use_full_tensor=True):
     """
     Compute sum of distances between actual and target tensor elements, 
     for all elements with known values in the dataset
@@ -757,19 +769,26 @@ def completion_loss(tensor_list, dataset, p=2):
                      a Pytorch vector of target values, and input_elms an 
                      integer Pytorch matrix of shape (num_cores, batch_dim)
         p:           Sets which p-norm is used for the loss (default: 2)
+        use_full_tensor: if True the tensor_list is contracted to a full tensor
+            to extract observed entries (does not scale to very large tensors!),
+            if False, efficient contractions with one hots is done.
 
     Returns:
         loss:        The sum of distance between targets and the output of
                      tensor_list when fed the contents of input_list
     """
     # Convert input_elms to one-hot vectors, then call regression loss
-    input_elms, targets = dataset
-    in_dims = get_indims(tensor_list)
-    one_hot = torch.functional.F.one_hot
-    input_list = [one_hot(vec, d).double()
-                      for vec, d in zip(input_elms, in_dims)]
-
-    return regression_loss(tensor_list, (input_list, targets), p=p)
+    if use_full_tensor:
+        full_tensor = wire_network(tensor_list,give_dense=True)
+        idx, vals = dataset
+        return torch.dist(full_tensor[idx.chunk(chunks=idx.shape[-1])],vals, p=p)
+    else:
+        input_elms, targets = dataset
+        in_dims = get_indims(tensor_list)
+        one_hot = torch.functional.F.one_hot
+        input_list = [one_hot(vec, d).double()
+                          for vec, d in zip(input_elms, in_dims)]
+        return regression_loss(tensor_list, (input_list, targets), p=p)
 
 @torch.no_grad()
 def batchify(dataset, batch_size=100, reps=1):
@@ -782,6 +801,7 @@ def batchify(dataset, batch_size=100, reps=1):
     """
     # Figure out which task we're dealing with
     if dataset is None: return  # Trivial input data with no iteration
+
     elif isinstance(dataset, list) and valid_formatting(dataset):
         task = 'recovery'
     elif len(dataset) == 2 and isinstance(dataset[0][0], torch.Tensor):
@@ -796,22 +816,32 @@ def batchify(dataset, batch_size=100, reps=1):
     # Loop until reps is 0
     while reps > 0:
         # For tensor recovery, just give the target tensor
-        if task == 'recovery':
+        if task == 'recovery' or batch_size < 0:
             yield dataset
 
         # For regression, return minibatches of (input, target) data
         elif task in ['regression', 'completion']:
             ind = 0
-            while ind < len(dataset):
+            while ind < len(dataset[1]):
                 inp = [ip[ind: ind+batch_size] for ip in inputs]
                 if tensor_input or task == 'completion':
                     inp = torch.stack(inp)
                 tar = targets[ind: ind+batch_size]
                 ind += batch_size
-
                 yield inp, tar
         reps = reps - 1
     return
+
+
+
+
+
+
+
+
+
+
+
 
 ### OLDER CODE ###
 
