@@ -139,7 +139,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     if early_stop and not has_val:
          raise ValueError("Early stopping (epochs=None) requires val_data "
                           "to be input")
-    loss_rec, first_loss, best_loss, best_network, best_epoch = [], None, None, None, None
+    loss_rec, first_loss, best_loss, best_network, best_epoch = [], None, np.infty, tensor_list, 0
     if hist: loss_record = ([], [])    # (train_record, val_record)
 
     # Function to maybe print, conditioned on `prnt`

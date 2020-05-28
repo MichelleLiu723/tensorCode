@@ -9,6 +9,8 @@ import tensornetwork as tn
 import core_code as cc
 from copy import deepcopy
 
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 def training(tensor_list, initial_epochs, train_data, 
             loss_fun, val_data, epochs, other_args):
     """
@@ -153,7 +155,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
     # continuous_optim, at each stage using a search procedure to 
     # test out different ranks before choosing just one to increase
     stage = -1
-    best_loss, best_network = np.infty, None
+    best_loss, best_network, best_network_optimizer_state = np.infty, None, None
 
     while not stop_cond(best_loss) and stage < max_iter:
         stage += 1
@@ -177,7 +179,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
         else:
             m_print(f"\n\n**** Discrete optimization - iteration {stage} ****\n\n\n")  
             best_search_loss = best_loss
-            best_train_lost_hist = None
+            best_train_lost_hist = []
 
             for i in range(len(initialNetwork)):
                 for j in range(i+1, len(initialNetwork)):
@@ -264,6 +266,24 @@ def greedy_optim(tensor_list, train_data, loss_fun,
 
     return best_network, best_loss, loss_record
 
+def greedy_decomposition(goal_tn):
+    loss_fun = cc.tensor_recovery_loss
+    input_dims = [t.shape[i] for i,t in enumerate(goal_tn)]
+    base_tn = cc.random_tn(input_dims, rank=1)
+
+    # Initialize the first tensor network close to zero
+    for i in range(len(base_tn)):
+        base_tn[i] /= 10
+    base_tn = cc.make_trainable(base_tn)
+
+    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=100, verbose=True,threshold=1e-7)
+    trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
+                                                      goal_tn, loss_fun, 
+                                                      other_args={'cprint':True, 'epochs':10000, 'max_iter':20, 
+                                                                  'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
+                                                                  'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler, 
+                                                                  'dyn_print':True,'initial_epochs':10})
+    return loss_record
 
 #for testing
 
@@ -299,14 +319,14 @@ if __name__ == '__main__':
     for i in range(len(base_tn)):
         base_tn[i] /= 10
     base_tn = cc.make_trainable(base_tn)
-    goal_tn = torch.load('tt_cores_5.pt')
+    goal_tn = torch.load('tri_cores_5.pt')
 
     print('target tensor network number of params: ', cc.num_params(goal_tn))
     print('number of params for full target tensor:', np.prod(input_dims))
     print('target tensor norm:', cc.l2_norm(goal_tn))
+    print('target tensor ranks:', cc.l2_norm(goal_tn))
 
 
-    from torch.optim.lr_scheduler import ReduceLROnPlateau
 
     lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=100, verbose=True,threshold=1e-7)
     trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
@@ -315,5 +335,5 @@ if __name__ == '__main__':
                                                       other_args={'cprint':True, 'epochs':1e10, 'max_iter':20, 
                                                                   'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
                                                                   'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler, 
-                                                                  'dyn_print':False,'initial_epochs':10})
+                                                                  'dyn_print':True,'initial_epochs':10})
  
