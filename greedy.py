@@ -10,6 +10,7 @@ import core_code as cc
 from copy import deepcopy
 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from utils import DetectPlateau
 
 def training(tensor_list, initial_epochs, train_data, 
             loss_fun, val_data, epochs, other_args):
@@ -91,12 +92,22 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                                 best rank 1 update. If None, the epochs argument
                                 is used.                    (default=None)
                         loss_threshold: if loss gets below this threshold, 
-                        discrete optimization is stopped
+                            discrete optimization is stopped
                                                             (default=1e-5)
                         initial_epochs: Number of epochs after which the 
-                        learning rate is reduced and optimization is restarted
-                        if there is no improvement in the loss.
+                            learning rate is reduced and optimization is restarted
+                            if there is no improvement in the loss.
                                                             (default=None)
+                        rank_increment: how much should a rank be increase at
+                            each discrete iterations        (default=1)
+                        stop_on_plateau: a dictionnary containing keys
+                                mode  (min/max)
+                                patience
+                                threshold
+                            used to stop continuous optimizaion when plateau
+                            is detected                     (default=None)
+                        gradient_hook: this is a hack, please ignore...
+
     
     Returns:
         better_list: List of tensors with same length as tensor_list, but
@@ -127,6 +138,14 @@ def greedy_optim(tensor_list, train_data, loss_fun,
     search_epochs  = other_args['search_epochs']  if 'search_epochs'  in other_args else epochs
     loss_threshold  = other_args['loss_threshold']  if 'loss_threshold'  in other_args else 1e-5
     initial_epochs  = other_args['initial_epochs'] if 'initial_epochs' in other_args else None
+    rank_increment  = other_args['rank_increment'] if 'rank_increment' in other_args else 1
+    gradient_hook  = other_args['gradient_hook'] if 'gradient_hook' in other_args else None
+
+    stop_on_plateau  = other_args['stop_on_plateau'] if 'stop_on_plateau' in other_args else None
+    if stop_on_plateau:
+        detect_plateau = DetectPlateau(**stop_on_plateau)
+        other_args["stop_condition"] = lambda train_loss,val_loss : detect_plateau(train_loss)
+
 
     first_loss, best_loss, best_network = ([],[]), None, None
     d_loss_hist = ([], [])
@@ -185,7 +204,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                 for j in range(i+1, len(initialNetwork)):
                     currentNetwork = cc.copy_network(initialNetwork)
                     #increase rank along a chosen dimension
-                    currentNetwork = cc.increase_rank(currentNetwork,i, j, 1, 1e-6)
+                    currentNetwork = cc.increase_rank(currentNetwork,i, j, rank_increment, 1e-6)
                     currentNetwork = cc.make_trainable(currentNetwork)
                     print('\ntesting rank increment for i =', i, 'j = ', j)
 
@@ -210,6 +229,8 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                     search_args["save_optimizer_state"] = True
                     search_args["optimizer_state"] = current_network_optimizer_state
                     search_args["grad_masking_function"] = grad_masking_function
+                    if stop_on_plateau:
+                        detect_plateau._reset()
                     [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
                         loss_fun, val_data=val_data, epochs=search_epochs, other_args=search_args)
                     first_loss = hist[0][0]
@@ -219,6 +240,8 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                     print("\noptimize all parameters for a few epochs")
                     search_args["grad_masking_function"] = None
                     search_args["load_optimizer_state"] = dict(current_network_optimizer_state)
+                    if stop_on_plateau:
+                        detect_plateau._reset()
                     [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
                         loss_fun, val_data=val_data, epochs=search_epochs, 
                         other_args=search_args)
@@ -244,9 +267,17 @@ def greedy_optim(tensor_list, train_data, loss_fun,
             current_network_optimizer_state = {}
             other_args["save_optimizer_state"] = True
             other_args["optimizer_state"] = current_network_optimizer_state
+
+
+            if gradient_hook: # A bit of a hack only used for tensor completion - ignore
+                other_args["grad_masking_function"] = gradient_hook
+            if stop_on_plateau:
+                detect_plateau._reset()
             [best_network, first_loss, best_loss, best_epoch, hist] = training(best_network, initial_epochs, train_data, 
                     loss_fun, val_data=val_data, epochs=epochs, 
                     other_args=other_args)
+            if gradient_hook:
+                other_args["grad_masking_function"] = None
             other_args["load_optimizer_state"] = None
             best_train_lost_hist += deepcopy(hist[0][:best_epoch])
 
@@ -276,64 +307,57 @@ def greedy_decomposition(goal_tn):
         base_tn[i] /= 10
     base_tn = cc.make_trainable(base_tn)
 
-    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=100, verbose=True,threshold=1e-7)
     trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
                                                       goal_tn, loss_fun, 
                                                       other_args={'cprint':True, 'epochs':10000, 'max_iter':20, 
                                                                   'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
-                                                                  'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler, 
+                                                                  'cvg_threshold':1e-10, 
+                                                                  'stop_on_plateau':{'mode':'min', 'patience':100, 'threshold':1e-7}, 
                                                                   'dyn_print':True,'initial_epochs':10})
     return loss_record
 
-#for testing
+def greedy_completion(dataset, input_dims):
 
-if __name__ == '__main__':
-    np.random.seed(0)
-    torch.manual_seed(0)
+    loss_fun = cc.completion_loss
+    base_tn = cc.random_tn(input_dims, rank=2)
 
-    # Old target:
-    #
-    # d0,d1,d2,d3,d4,d5   = 4,4,4,4,4,4
-    # r12,r23,r34,r45,r56 =  2,3,6,5,4
-    # input_dims = [d0, d1, d2, d3, d4, d5]
-    # rank_list = [[r12, 1, 1, 1, 1], 
-    #                  [r23,1, 1, 1], 
-    #                      [r34, 1, 1],
-    #                           [r45, 1],
-    #                                [r56]]
-
-    # New target
-    d0,d1,d2,d3,d4   = 7,7,7,7,7
-    r12,r23,r34,r45 =  2,3,6,5
-
-    input_dims = [d0, d1, d2, d3, d4]
-    rank_list = [[r12, 1, 1, 1], 
-                     [r23,1, 1], 
-                         [r34, 1],
-                              [r45]]
-    
-    loss_fun = cc.tensor_recovery_loss
-    base_tn = cc.random_tn(input_dims, rank=1)
-    
     # Initialize the first tensor network close to zero
     for i in range(len(base_tn)):
-        base_tn[i] /= 10
+        base_tn[i] /= 1000
     base_tn = cc.make_trainable(base_tn)
-    goal_tn = torch.load('tri_cores_5.pt')
 
-    print('target tensor network number of params: ', cc.num_params(goal_tn))
-    print('number of params for full target tensor:', np.prod(input_dims))
-    print('target tensor norm:', cc.l2_norm(goal_tn))
-    print('target tensor ranks:', cc.l2_norm(goal_tn))
+    #lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-20, patience=5, verbose=True,threshold=1e-7)
 
+    import pylab as plt 
+    import logging
 
+    def gradient_hook(tensor_list):
 
-    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-10, patience=100, verbose=True,threshold=1e-7)
+        logger = logging.getLogger()
+        old_level = logger.level
+        logger.setLevel(100)
+        plot.set_data((cc.wire_network(cc.copy_network(tensor_list),give_dense=True).detach()).numpy())
+        plt.draw()
+        plt.pause(1e-4)
+        logger.setLevel(old_level)
+
+    # plot = plt.imshow(cc.wire_network(cc.copy_network(base_tn),give_dense=True).detach())
+    # plt.ion()
+    # plt.draw()
+    # plt.pause(1e-4)
+    # plt.show()
+
     trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
-                                                      goal_tn, loss_fun, 
-                                                      #val_data=goal_tn, #None, 
-                                                      other_args={'cprint':True, 'epochs':1e10, 'max_iter':20, 
-                                                                  'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
-                                                                  'cvg_threshold':1e-10, 'lr_scheduler':lr_scheduler, 
-                                                                  'dyn_print':True,'initial_epochs':10})
- 
+                                                      dataset, loss_fun, 
+                                                      other_args={'cprint':True, 'epochs':10000, 'max_iter':20, 
+                                                                  'lr':0.1, 'optim':'RMSprop', 'search_epochs':80, 
+                                                                  'cvg_threshold':1e-10, 
+                                                                  'stop_on_plateau':{'mode':'min', 'patience':100, 'threshold':1e-7},
+                                                                  'dyn_print':False,'initial_epochs':10,'bsize':-1,
+                                                                  #'gradient_hook':gradient_hook
+                                                                  })
+
+
+    return loss_record
+
+
