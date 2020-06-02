@@ -232,7 +232,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                     current_network_optimizer_state = {}
                     search_args["save_optimizer_state"] = True
                     search_args["optimizer_state"] = current_network_optimizer_state
-                    if not is_val:
+                    if not is_reg:
                         search_args["grad_masking_function"] = grad_masking_function
                     if stop_on_plateau:
                         detect_plateau._reset()
