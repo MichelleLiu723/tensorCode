@@ -62,7 +62,7 @@ def training(tensor_list, initial_epochs, train_data,
 
 
 def greedy_optim(tensor_list, train_data, loss_fun, 
-                            val_data=None, other_args=dict(),max_iter=None):
+                val_data=None, other_args=dict(),max_iter=None):
     """
     Train a tensor network using discrete optimization over TN ranks
     Args:
@@ -249,15 +249,15 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                 current_network_optimizer_state = {}
                 search_args["save_optimizer_state"] = True
                 search_args["optimizer_state"] = current_network_optimizer_state
-                    if not is_reg:
-                        search_args["grad_masking_function"] = grad_masking_function
+                if not is_reg:
+                    search_args["grad_masking_function"] = grad_masking_function
                 if stop_on_plateau:
                     detect_plateau._reset()
                 [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
                     loss_fun, val_data=val_data, epochs=search_epochs, other_args=search_args)
                 first_loss = hist[0][0]
                 train_lost_hist = deepcopy(hist[0][:best_epoch])
-                 val_loss_hist = deepcopy(hist[0][:best_epoch])
+                val_loss_hist = deepcopy(hist[0][:best_epoch])
 
                 # We then optimize all parameters for a few epochs
                 print("\noptimize all parameters for a few epochs")
@@ -325,6 +325,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                   pickle.dump(loss_record,f)
 
     return best_network, best_loss, loss_record
+
 
 def greedy_decomposition(goal_tn, initial_network=None,filename=None):
     loss_fun = cc.tensor_recovery_loss
