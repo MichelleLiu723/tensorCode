@@ -11,6 +11,7 @@ from copy import deepcopy
 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from utils import DetectPlateau
+import pickle
 
 def training(tensor_list, initial_epochs, train_data, 
             loss_fun, val_data, epochs, other_args):
@@ -106,7 +107,11 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                                 threshold
                             used to stop continuous optimizaion when plateau
                             is detected                     (default=None)
-                        gradient_hook: this is a hack, please ignore...
+                        allowed_edges: a list of allowed edges of rank more than
+                            one in the tensor network. If None, all edges are
+                            considered.                     (default=None)
+                        filename: pickle filename to save the loss_record after each
+                        continuous optimization.            (default=None)
 
     
     Returns:
@@ -130,6 +135,7 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                         the epoch where the new best network was found
                      TODO: add val_lost_hist to the list of keys
     """
+
     # Check input and initialize local record variables
     epochs  = other_args['epochs'] if 'epochs' in other_args else 10
     max_iter  = other_args['max_iter'] if 'max_iter' in other_args else 10
@@ -140,7 +146,15 @@ def greedy_optim(tensor_list, train_data, loss_fun,
     initial_epochs  = other_args['initial_epochs'] if 'initial_epochs' in other_args else None
     rank_increment  = other_args['rank_increment'] if 'rank_increment' in other_args else 1
     gradient_hook  = other_args['gradient_hook'] if 'gradient_hook' in other_args else None
+    allowed_edges  = other_args['allowed_edges'] if 'allowed_edges' in other_args else None
+    filename = other_args['filename'] if 'filename' in other_args else None
     is_reg = other_args['is_reg'] if 'is_reg' in other_args else False
+
+    if not allowed_edges:
+        ndims = len(tensor_list)
+        allowed_edges = [(i,j) for i in range(ndims) for j in range(i+1,ndims)]
+
+    assert initial_epochs < search_epochs and (not epochs or initial_epochs < epochs), "initial_epochs must be smaller than search_epochs and epochs"
 
     stop_on_plateau  = other_args['stop_on_plateau'] if 'stop_on_plateau' in other_args else None
     if stop_on_plateau:
@@ -198,73 +212,76 @@ def greedy_optim(tensor_list, train_data, loss_fun,
                 'train_loss_hist':hist[0][:best_epoch],
                 'val_loss_hist':hist[0][:best_epoch]})
 
+            if filename:
+                with open(filename, "wb") as f:
+                  pickle.dump(loss_record,f)
+
         else:
             m_print(f"\n\n**** Discrete optimization - iteration {stage} ****\n\n\n")  
             best_search_loss = best_loss
             best_train_lost_hist = []
             best_val_loss_hist = []
 
-            for i in range(len(initialNetwork)):
-                for j in range(i+1, len(initialNetwork)):
-                    currentNetwork = cc.copy_network(initialNetwork)
-                    #increase rank along a chosen dimension
-                    currentNetwork = cc.increase_rank(currentNetwork,i, j, rank_increment, 1e-6)
-                    currentNetwork = cc.make_trainable(currentNetwork)
-                    print('\ntesting rank increment for i =', i, 'j = ', j)
+            for (i,j) in allowed_edges: 
+                currentNetwork = cc.copy_network(initialNetwork)
+                #increase rank along a chosen dimension
+                currentNetwork = cc.increase_rank(currentNetwork,i, j, rank_increment, 1e-6)
+                currentNetwork = cc.make_trainable(currentNetwork)
+                print('\ntesting rank increment for i =', i, 'j = ', j)
 
-                    ### Search optimization phase
-                    # we d only a few epochs to identify the most promising rank update
+                ### Search optimization phase
+                # we d only a few epochs to identify the most promising rank update
 
-                    # function to zero out the gradient of all entries except for the new slices
-                    def grad_masking_function(tensor_list):
-                        nonlocal i,j
-                        for k in range(len(tensor_list)):
-                            if k == i:
-                                tensor_list[i].grad.permute([j]+list(range(0,j))+list(range(j+1,len(currentNetwork))))[:-1,:,...] *= 0
-                            elif k == j:
-                                tensor_list[j].grad.permute([i]+list(range(0,i))+list(range(i+1,len(currentNetwork))))[:-1,:,...] *= 0
-                            else:
-                                tensor_list[k].grad *= 0
+                # function to zero out the gradient of all entries except for the new slices
+                def grad_masking_function(tensor_list):
+                    nonlocal i,j
+                    for k in range(len(tensor_list)):
+                        if k == i:
+                            tensor_list[i].grad.permute([j]+list(range(0,j))+list(range(j+1,len(currentNetwork))))[:-1,:,...] *= 0
+                        elif k == j:
+                            tensor_list[j].grad.permute([i]+list(range(0,i))+list(range(i+1,len(currentNetwork))))[:-1,:,...] *= 0
+                        else:
+                            tensor_list[k].grad *= 0
 
-                    # we first optimize only the new slices for a few epochs
-                    print("optimize new slices for a few epochs")
-                    search_args = dict(other_args)
-                    current_network_optimizer_state = {}
-                    search_args["save_optimizer_state"] = True
-                    search_args["optimizer_state"] = current_network_optimizer_state
+                # we first optimize only the new slices for a few epochs
+                print("optimize new slices for a few epochs")
+                search_args = dict(other_args)
+                current_network_optimizer_state = {}
+                search_args["save_optimizer_state"] = True
+                search_args["optimizer_state"] = current_network_optimizer_state
                     if not is_reg:
                         search_args["grad_masking_function"] = grad_masking_function
-                    if stop_on_plateau:
-                        detect_plateau._reset()
-                    [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
-                        loss_fun, val_data=val_data, epochs=search_epochs, other_args=search_args)
-                    first_loss = hist[0][0]
-                    train_lost_hist = deepcopy(hist[0][:best_epoch])
-                    val_loss_hist = deepcopy(hist[0][:best_epoch])
+                if stop_on_plateau:
+                    detect_plateau._reset()
+                [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
+                    loss_fun, val_data=val_data, epochs=search_epochs, other_args=search_args)
+                first_loss = hist[0][0]
+                train_lost_hist = deepcopy(hist[0][:best_epoch])
+                 val_loss_hist = deepcopy(hist[0][:best_epoch])
 
-                    # We then optimize all parameters for a few epochs
-                    print("\noptimize all parameters for a few epochs")
-                    search_args["grad_masking_function"] = None
-                    search_args["load_optimizer_state"] = dict(current_network_optimizer_state)
-                    if stop_on_plateau:
-                        detect_plateau._reset()
-                    [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
-                        loss_fun, val_data=val_data, epochs=search_epochs, 
-                        other_args=search_args)
-                    search_args["load_optimizer_state"] = None
-                    train_lost_hist += deepcopy(hist[0][:best_epoch])
-                    val_loss_hist += deepcopy(hist[1][:best_epoch])
+                # We then optimize all parameters for a few epochs
+                print("\noptimize all parameters for a few epochs")
+                search_args["grad_masking_function"] = None
+                search_args["load_optimizer_state"] = dict(current_network_optimizer_state)
+                if stop_on_plateau:
+                    detect_plateau._reset()
+                [currentNetwork, first_loss, current_loss, best_epoch, hist] = training(currentNetwork, initial_epochs, train_data, 
+                    loss_fun, val_data=val_data, epochs=search_epochs, 
+                    other_args=search_args)
+                search_args["load_optimizer_state"] = None
+                train_lost_hist += deepcopy(hist[0][:best_epoch])
+                val_loss_hist += deepcopy(hist[1][:best_epoch])
 
 
 
-                    m_print(f"\nCurrent loss is {current_loss:.7f}    Best loss from previous discrete optim is {best_loss}")
-                    if best_search_loss > current_loss:
-                        best_search_loss = current_loss
-                        best_network = currentNetwork
-                        best_network_optimizer_state = deepcopy(current_network_optimizer_state)
-                        best_train_lost_hist = train_lost_hist
-                        best_val_loss_hist = val_loss_hist
-                        print('-> best rank update so far:', i,j)
+                m_print(f"\nCurrent loss is {current_loss:.7f}    Best loss from previous discrete optim is {best_loss}")
+                if best_search_loss > current_loss:
+                    best_search_loss = current_loss
+                    best_network = currentNetwork
+                    best_network_optimizer_state = deepcopy(current_network_optimizer_state)
+                    best_train_lost_hist = train_lost_hist
+                    best_val_loss_hist = val_loss_hist
+                    print('-> best rank update so far:', i,j)
 
 
             best_loss = best_search_loss
@@ -277,15 +294,13 @@ def greedy_optim(tensor_list, train_data, loss_fun,
             other_args["optimizer_state"] = current_network_optimizer_state
 
 
-            if gradient_hook: # A bit of a hack only used for tensor completion - ignore
-                other_args["grad_masking_function"] = gradient_hook
             if stop_on_plateau:
                 detect_plateau._reset()
             [best_network, first_loss, best_loss, best_epoch, hist] = training(best_network, initial_epochs, train_data, 
                     loss_fun, val_data=val_data, epochs=epochs, 
                     other_args=other_args)
-            if gradient_hook:
-                other_args["grad_masking_function"] = None
+
+
             other_args["load_optimizer_state"] = None
             best_train_lost_hist += deepcopy(hist[0][:best_epoch])
             best_val_loss_hist += deepcopy(hist[1][:best_epoch])
@@ -305,9 +320,13 @@ def greedy_optim(tensor_list, train_data, loss_fun,
             print('number of params:',cc.num_params(best_network))
             print([(r['iter'],r['num_params'],float(r['loss']),float(r['train_loss_hist'][0]),float(r['train_loss_hist'][-1])) for r in loss_record])
 
+            if filename:
+                with open(filename, "wb") as f:
+                  pickle.dump(loss_record,f)
+
     return best_network, best_loss, loss_record
 
-def greedy_decomposition(goal_tn):
+def greedy_decomposition(goal_tn, initial_network=None,filename=None):
     loss_fun = cc.tensor_recovery_loss
     input_dims = [t.shape[i] for i,t in enumerate(goal_tn)]
     base_tn = cc.random_tn(input_dims, rank=1)
@@ -317,54 +336,52 @@ def greedy_decomposition(goal_tn):
         base_tn[i] /= 10
     base_tn = cc.make_trainable(base_tn)
 
+    if initial_network:
+        base_tn = initial_network
+
     trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
                                                       goal_tn, loss_fun, 
                                                       other_args={'cprint':True, 'epochs':10000, 'max_iter':20, 
                                                                   'lr':0.01, 'optim':'RMSprop', 'search_epochs':80, 
                                                                   'cvg_threshold':1e-10, 
                                                                   'stop_on_plateau':{'mode':'min', 'patience':100, 'threshold':1e-7}, 
-                                                                  'dyn_print':True,'initial_epochs':10})
+                                                                  'dyn_print':True,'initial_epochs':10,
+                                                                  'filename':filename})
     return loss_record
 
-def greedy_completion(dataset, input_dims):
+def greedy_completion(dataset, input_dims, initial_network=None,filename=None):
 
     loss_fun = cc.completion_loss
-    base_tn = cc.random_tn(input_dims, rank=2)
+    from generate_tensor_ring import generate_tensor_ring
+
+    base_tn = cc.random_tn(input_dims, rank=1)
 
     # Initialize the first tensor network close to zero
     for i in range(len(base_tn)):
-        base_tn[i] /= 1000
+        base_tn[i] /= 1
     base_tn = cc.make_trainable(base_tn)
 
-    #lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=1e-20, patience=5, verbose=True,threshold=1e-7)
 
-    import pylab as plt 
-    import logging
+    if initial_network:
+        base_tn = initial_network
 
-    def gradient_hook(tensor_list):
+    # create list of all edges allowed in a TR decomposition    
+    #ndims = len(base_tn)
+    #tr_edges = [(i,j) for i in range(ndims) for j in range(i+1,ndims) if i+1==j] + [(0,ndims-1)]
 
-        logger = logging.getLogger()
-        old_level = logger.level
-        logger.setLevel(100)
-        plot.set_data((cc.wire_network(cc.copy_network(tensor_list),give_dense=True).detach()).numpy())
-        plt.draw()
-        plt.pause(1e-4)
-        logger.setLevel(old_level)
 
-    # plot = plt.imshow(cc.wire_network(cc.copy_network(base_tn),give_dense=True).detach())
-    # plt.ion()
-    # plt.draw()
-    # plt.pause(1e-4)
-    # plt.show()
-
+    lr_scheduler = lambda optimizer: ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, verbose=True,threshold=1e-7)
     trained_tn, best_loss, loss_record = greedy_optim(base_tn, 
                                                       dataset, loss_fun, 
-                                                      other_args={'cprint':True, 'epochs':10000, 'max_iter':20, 
-                                                                  'lr':0.1, 'optim':'RMSprop', 'search_epochs':80, 
+                                                      other_args={'cprint':True, 'epochs':20000, 'max_iter':100, 
+                                                                  'lr':0.01, 'optim':'RMSprop', 'search_epochs':20, 
                                                                   'cvg_threshold':1e-10, 
-                                                                  'stop_on_plateau':{'mode':'min', 'patience':100, 'threshold':1e-7},
-                                                                  'dyn_print':False,'initial_epochs':10,'bsize':-1,
-                                                                  #'gradient_hook':gradient_hook
+                                                                  #'stop_on_plateau':{'mode':'min', 'patience':50, 'threshold':1e-7},
+                                                                  'dyn_print':True,'initial_epochs':10,'bsize':-1,
+                                                                  'rank_increment':2,
+                                                                  #'allowed_edges':tr_edges
+                                                                  'lr_scheduler':lr_scheduler,
+                                                                  'filename':filename
                                                                   })
 
 
