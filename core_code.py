@@ -236,7 +236,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
             if grad_masking_function:
                 grad_masking_function(tensor_list)
             optim.step()
-            
+
             with torch.no_grad():
                 num_train += 1
                 train_loss += loss
@@ -257,11 +257,11 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
         if has_val:
             # Get and record validation loss, check early stopping condition
             loss_history(val_loss, is_val=True)
-            if record_loss(val_loss, tensor_list, ep) and early_stop:
+            if record_loss(val_loss, copy_network(tensor_list) if has_val else prev_tensor_list, ep) and early_stop:
                 print(f"\nEarly stopping condition reached")
                 break
         else:
-            record_loss(train_loss, prev_tensor_list, ep)
+            record_loss(train_loss, copy_network(tensor_list) if has_val else prev_tensor_list, ep)
 
         if cvg_threshold and np.abs(train_loss-prev_loss)/prev_loss < cvg_threshold:
             print(f"\nConvergence criteria reached")
