@@ -61,6 +61,7 @@ for decomp in "greedy CP TT Tucker".split():
     results[decomp] = incremental_tensor_decomposition(target_full,decomp,verbose=True,max_num_params=3000, 
       rank_increment_factor=1.5 if decomp=='CP' else 1)
   results['_xp-infos_'][decomp + "-runtime"] = toc()
+  
 with open(result_file, "wb") as f:
   pickle.dump(results,f)
 
