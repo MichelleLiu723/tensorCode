@@ -51,9 +51,9 @@ results = {"_xp-infos_":{
 
 from tensor_decomposition_models import incremental_tensor_decomposition
 from randomsearch import randomsearch_decomposition
-from randomwalk import greedy_decomposition
+from randomwalk import randomwalk_decomposition
 from greedy import greedy_decomposition
-for decomp in "randomsearch randomwalk greedy CP TT Tucker".split():
+for decomp in ["greedy"]:#"randomsearch randomwalk greedy CP TT Tucker".split():
   print("*"*80)
   print(f"\n\n\nrunning {decomp} decomposition...\n")
   tic()
@@ -62,7 +62,7 @@ for decomp in "randomsearch randomwalk greedy CP TT Tucker".split():
   elif decomp == "randomwalk":
     results[decomp] = randomwalk_decomposition(goal_tn)
   elif decomp == "greedy":
-    results[decomp] = greedy_decomposition(goal_tn)
+    results[decomp] = greedy_decomposition(goal_tn,filename="results-tt.pickle")
   else:
     results[decomp] = incremental_tensor_decomposition(target_full,decomp,verbose=True,max_num_params=3000, 
       rank_increment_factor=1.5 if decomp=='CP' else 1)
