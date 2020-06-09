@@ -136,6 +136,7 @@ def continuous_optim(tensor_list, train_data, loss_fun, epochs=10,
     grad_masking_function  = other_args['grad_masking_function']  if 'grad_masking_function'  in other_args else None
     momentum = other_args['momentum'] if 'momentum' in other_args else 0
 
+
     stop_condition  = other_args['stop_condition']  if 'stop_condition'  in other_args else None
 
     if save_optimizer_state and (not 'optimizer_state' in other_args):
